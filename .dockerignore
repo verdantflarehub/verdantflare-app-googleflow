@@ -1,0 +1,14 @@
+**
+!Dockerfile
+!pyproject.toml
+!google_flow_gateway/
+!google_flow_gateway/*.py
+!dashboard/
+!dashboard/*.html
+!dashboard/*.css
+!dashboard/*.mjs
+!runtime/
+!runtime/entrypoint.sh
+!runtime/desktop-control.py
+!runtime/supervisord.conf
+!runtime/webrtc-run.py

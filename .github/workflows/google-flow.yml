@@ -1,0 +1,117 @@
+name: Google Flow Channel
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [release]
+    paths:
+      - google_flow_gateway/**
+      - dashboard/**
+      - Dockerfile
+      - .dockerignore
+      - pyproject.toml
+      - runtime/**
+      - .github/workflows/google-flow.yml
+permissions:
+  contents: read
+concurrency:
+  group: google-flow-release
+  cancel-in-progress: false
+env:
+  SERVICE: google-flow
+jobs:
+  build:
+    if: github.ref == 'refs/heads/release'
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker/setup-buildx-action@v3
+      - id: image
+        env:
+          REGISTRY_ENDPOINT: ${{ secrets.REGISTRY_ENDPOINT_ALIYUN }}
+        run: |
+          set -euo pipefail
+          VERSION=$(python -c 'import tomllib; print(tomllib.load(open("pyproject.toml","rb"))["project"]["version"])')
+          [[ "$VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]
+          echo "VERSION=$VERSION" >> "$GITHUB_ENV"
+          registry_endpoint="${REGISTRY_ENDPOINT%/}"
+          test -n "${registry_endpoint}"
+          echo "registry_endpoint=${registry_endpoint}" >> "$GITHUB_OUTPUT"
+          echo "name=${registry_endpoint}/wod/verdantflare-app" >> "$GITHUB_OUTPUT"
+          echo "version=${SERVICE}-v${VERSION}" >> "$GITHUB_OUTPUT"
+      - uses: docker/login-action@v3
+        with:
+          registry: ${{ steps.image.outputs.registry_endpoint }}
+          username: ${{ secrets.REGISTRY_USER_ALIYUN }}
+          password: ${{ secrets.REGISTRY_PASSWORD_ALIYUN }}
+      - name: Refuse an existing image tag
+        run: |
+          set -euo pipefail
+          if docker buildx imagetools inspect "${{ steps.image.outputs.name }}:${{ steps.image.outputs.version }}" > /tmp/image-inspect.log 2>&1; then
+            echo "Refusing to overwrite an existing release"
+            exit 1
+          fi
+          grep -Eqi 'manifest unknown|: not found$' /tmp/image-inspect.log || { echo "Registry preflight failed"; exit 1; }
+      - uses: docker/build-push-action@v6
+        with:
+          context: .
+          load: true
+          platforms: linux/amd64
+          build-args: REGISTRY_ENDPOINT_ALIYUN=${{ steps.image.outputs.registry_endpoint }}
+          tags: google-flow-candidate:ci
+          cache-from: type=gha,scope=google-flow
+          cache-to: type=gha,mode=max,scope=google-flow
+      - name: Label the built image and publish
+        id: publish
+        env:
+          APP_IMAGE: ${{ steps.image.outputs.name }}:${{ steps.image.outputs.version }}
+        run: |
+          set -euo pipefail
+          chrome=$(docker run --rm --entrypoint /opt/google/chrome/chrome google-flow-candidate:ci --version)
+          [[ "$chrome" =~ ^Google\ Chrome\ [0-9.]+ ]]
+          docker buildx build --builder default --load --pull=false --label "com.verdantflare.google-flow.chrome-version=$chrome" \
+            --label "org.opencontainers.image.version=$VERSION" --tag "$APP_IMAGE" - <<< 'FROM google-flow-candidate:ci'
+          docker push "$APP_IMAGE" | tee "$RUNNER_TEMP/google-flow-push.log"
+          digest=$(sed -nE 's/^.*digest: (sha256:[a-f0-9]{64}) size:.*$/\1/p' "$RUNNER_TEMP/google-flow-push.log")
+          [[ "$digest" =~ ^sha256:[a-f0-9]{64}$ ]]
+          echo "digest=$digest" >> "$GITHUB_OUTPUT"
+      - name: Extract published Dashboard bytes
+        env:
+          APP_IMAGE: ${{ steps.image.outputs.name }}:${{ steps.image.outputs.version }}
+          APP_IMAGE_DIGEST: ${{ steps.publish.outputs.digest }}
+          APP_IMAGE_NAME: ${{ steps.image.outputs.name }}
+        run: |
+          set -euo pipefail
+          mkdir -p dashboard-release
+          docker pull "${APP_IMAGE_NAME}@${APP_IMAGE_DIGEST}"
+          extract_container=$(docker create "${APP_IMAGE_NAME}@${APP_IMAGE_DIGEST}")
+          trap 'docker rm "$extract_container" >/dev/null' EXIT
+          docker cp "${extract_container}:/app/dashboard" dashboard-release/dashboard
+          python - <<'PY'
+          import hashlib, json, os, pathlib
+          root = pathlib.Path('dashboard-release')
+          declaration = json.loads((root / 'dashboard/dashboard-declaration.json').read_bytes())
+          if declaration['appId'] != 'google-flow' or declaration['appVersion'] != os.environ['VERSION']:
+              raise SystemExit('Dashboard version mismatch')
+          index = root / 'dashboard/asset-index.json'
+          dashboard_digest = 'sha256:' + hashlib.sha256(index.read_bytes()).hexdigest()
+          if declaration['dashboard']['artifactDigest'] != dashboard_digest:
+              raise SystemExit('Dashboard index mismatch')
+          for name, expected in json.loads(index.read_bytes())['files'].items():
+              if hashlib.sha256((index.parent / name).read_bytes()).hexdigest() != expected:
+                  raise SystemExit('Dashboard asset mismatch')
+          files = {p.relative_to(root).as_posix(): hashlib.sha256(p.read_bytes()).hexdigest()
+                   for p in sorted(root.rglob('*')) if p.is_file()}
+          release = dict(schemaVersion=1, appId='google-flow', appVersion=os.environ['VERSION'],
+                         sourceCommit=os.environ['GITHUB_SHA'], actionsRunId=os.environ['GITHUB_RUN_ID'],
+                         actionsRunAttempt=os.environ['GITHUB_RUN_ATTEMPT'], appImage=os.environ['APP_IMAGE'],
+                         appImageDigest=os.environ['APP_IMAGE_DIGEST'], dashboardDigest=dashboard_digest, files=files)
+          (root / 'release.json').write_text(json.dumps(release, sort_keys=True, indent=2) + '\n', encoding='utf-8')
+          PY
+      - uses: actions/upload-artifact@v4
+        with:
+          name: google-flow-dashboard-v${{ env.VERSION }}
+          path: dashboard-release/
+          if-no-files-found: error
+          retention-days: 30

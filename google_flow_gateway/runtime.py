@@ -113,7 +113,7 @@ async def run():
                 if not lease.valid:
                     if await lease.recover():
                         await command(hook, "start")
-                        allowed = {"PATH", "HOME", "LANG", "LC_ALL", "DISPLAY", "WAYLAND_DISPLAY",
+                        allowed = {"PATH", "HOME", "DO_NOT_TRACK", "LANG", "LC_ALL", "DISPLAY", "WAYLAND_DISPLAY",
                                    "DBUS_SESSION_BUS_ADDRESS", "HTTPS_PROXY", "HTTP_PROXY", "NO_PROXY"}
                         process_env = {key: value for key, value in env.items()
                                        if key.upper() in allowed or key.startswith(("XDG_", "GFLOW_CLI_"))}

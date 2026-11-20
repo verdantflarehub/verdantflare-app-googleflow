@@ -44,3 +44,13 @@ python -m google_flow_gateway.runtime
 - [技术白皮书](../docs/design/app/google-flow/details/google-flow.technical-whitepaper.md)
 - [锁卷验收 S1](../docs/acceptance/accept_20261117_google-flow-mcp.md)
 - [T3.2 执行记录](../docs/changes/change_20261119_build-google-flow-gateway.md)
+
+## 6. 镜像构建与发布
+
+`release` 分支的工作流读取 `pyproject.toml` 版本，从 `REGISTRY_ENDPOINT_ALIYUN` 拉取锁定摘要的 KDE6 底座，构建 linux/amd64 镜像。构建阶段检查 Chrome 可执行文件，必要时安装官方稳定版，并打包 Dashboard。工作流从构建产物读取 Chrome 版本并写入镜像标签 `com.verdantflare.google-flow.chrome-version`。回滚前核对该版本与持久 profile 的兼容性。
+
+仓库 Secrets 使用 `REGISTRY_ENDPOINT_ALIYUN`、`REGISTRY_USER_ALIYUN`、`REGISTRY_PASSWORD_ALIYUN`。在 `release` 上推送构建输入或手动触发工作流，发布目标为 `wod/verdantflare-app:google-flow-v<版本>`。预检发现同名标签时，工作流终止。发布后按镜像摘要提取 Dashboard，上传的 `google-flow-dashboard-v<版本>` 包含静态资源与 `release.json`，可核对源码提交、镜像摘要、Dashboard 索引摘要及逐文件 SHA-256。
+
+镜像以 uid 1000 运行。入口要求恰好一块可见 NVIDIA GPU 和一个 render node。网关绑定同卡租约后启动 KDE6，管理员打开桌面时签发短期 TURN 配置并启动 WebRTC。部署通过 `GOOGLE_FLOW_VIEWER_PATH` 提供 Studio 代理的桌面相对路径。关闭桌面连接时停止信令，失租或退出时停止整套桌面并检查容器内设备占用。部署需提供可写的三个 PVC 子目录、运行时目录和 45 秒终止宽限期。
+
+[发布工作流](.github/workflows/google-flow.yml)

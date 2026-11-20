@@ -1,5 +1,5 @@
 [project]
-name = "verdantflare-app-google-flow"
+name = "verdantflare-app-googleflow"
 version = "0.1.0"
 requires-python = ">=3.11"
 dependencies = [
