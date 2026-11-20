@@ -76,6 +76,26 @@ class Media:
             raise Error("digest_mismatch")
         return data
 
+    def path_with_ext(self, digest):
+        data = self.read(digest)
+        if data.startswith(b"\x89PNG\r\n\x1a\n"):
+            ext = ".png"
+        elif data.startswith(b"\xff\xd8\xff"):
+            ext = ".jpg"
+        elif len(data) >= 12 and data[:4] == b"RIFF" and data[8:12] == b"WEBP":
+            ext = ".webp"
+        else:
+            raise Error("invalid_media")
+        target = self.root / f"{digest}{ext}"
+        if not target.is_file() or target.stat().st_size != len(data):
+            with NamedTemporaryFile(dir=self.root, delete=False) as tmp:
+                tmp.write(data)
+            try:
+                os.replace(tmp.name, target)
+            finally:
+                Path(tmp.name).unlink(missing_ok=True)
+        return target
+
     def collect(self, path, output, mime):
         base = Path(output).resolve()
         source = Path(path).resolve()
@@ -85,6 +105,6 @@ class Media:
 
     def cleanup(self, before, protected):
         for path in self.root.iterdir():
-            if (re.fullmatch("[a-f0-9]{64}", path.name) and path.name not in protected
-                    and path.stat().st_mtime < before):
+            match = re.fullmatch(r"([a-f0-9]{64})(?:\.(?:png|jpg|webp))?", path.name)
+            if match and match.group(1) not in protected and path.stat().st_mtime < before:
                 path.unlink(missing_ok=True)

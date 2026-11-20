@@ -107,11 +107,12 @@ class Gateway:
 
     def references(self, owner, payload):
         refs = payload["parameters"].get("reference_images", [])
+        paths = []
         for ref in refs:
             if not self.q.db.execute("SELECT 1 FROM inputs WHERE owner=? AND digest=?", (owner, ref)).fetchone():
                 raise Error("forbidden", 403)
-            self.media.read(ref)
-        return [str(self.media.root / ref) for ref in refs]
+            paths.append(str(self.media.path_with_ext(ref)))
+        return paths
 
     async def dispatch(self, row):
         if row["state"] != "pending" or row["id"] in self._inflight:
