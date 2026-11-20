@@ -68,6 +68,7 @@ class Gateway:
     def __init__(self, queue, client, media, output, org):
         self.q, self.client, self.media, self.output, self.org = queue, client, media, output, org
         self.admitted = lambda: True
+        self._inflight = set()
         self.q.db.executescript("""
             CREATE TABLE IF NOT EXISTS inputs(owner TEXT, digest TEXT, PRIMARY KEY(owner,digest));
             CREATE TABLE IF NOT EXISTS results(id TEXT PRIMARY KEY, metadata TEXT);
@@ -113,46 +114,50 @@ class Gateway:
         return [str(self.media.root / ref) for ref in refs]
 
     async def dispatch(self, row):
-        if row["state"] != "pending":
+        if row["state"] != "pending" or row["id"] in self._inflight:
             return
-        if not self.admitted():
-            raise Error("gpu_lease_lost", 503)
-        payload = json.loads(row["payload"])
-        args = payload["parameters"].copy()
-        paths = self.references(row["owner"], payload)
-        if paths:
-            args["reference_images"] = paths
-            if payload["capability"] == "video":
-                args["mode"] = "r2v"
-        acct = await self.client.account()
-        if not acct["authorized"]:
-            with self.q.transaction():
-                self.q.pause("authorization_required", call_id=row["id"])
-            raise Error("authorization_required", 403)
-        catalog = await self.client.catalog()
-        if payload["model"] not in catalog["models"][payload["capability"]]:
-            raise Error("capability_not_supported")
-        quote = self.client.quote(payload)
-        if not self.admitted():
-            raise Error("gpu_lease_lost", 503)
-        if not self.q.admit(row["id"], quote, acct["credits"]):
-            return
+        self._inflight.add(row["id"])
         try:
-            result = await self.client.tool("gflow_generate_" + payload["capability"], model=payload["model"], **args)
-        except Error:
-            result = {}
-        media = result.get("flow_media_id")
-        if isinstance(media, str) and ID.fullmatch(media):
-            self.q.outcome(row["id"], True, media=media)
-            await self.collect(self.q.find("id", row["id"]), result)
-        else:
-            error = result.get("error", {})
-            error = error if isinstance(error, dict) else {}
-            unusual = (str(error.get("code", "")).lower() == "unusual_activity"
-                       or "PUBLIC_ERROR_UNUSUAL_ACTIVITY" in str(error.get("detail", "")))
-            rejected = unusual or error.get("charged") == "no" or error.get("accepted") is False
-            self.q.outcome(row["id"], False if rejected else None,
-                           reason="unusual_activity" if unusual else "rejected" if rejected else "acceptance_unknown")
+            if not self.admitted():
+                raise Error("gpu_lease_lost", 503)
+            payload = json.loads(row["payload"])
+            args = payload["parameters"].copy()
+            paths = self.references(row["owner"], payload)
+            if paths:
+                args["reference_images"] = paths
+                if payload["capability"] == "video":
+                    args["mode"] = "r2v"
+            acct = await self.client.account()
+            if not acct["authorized"]:
+                with self.q.transaction():
+                    self.q.pause("authorization_required", call_id=row["id"])
+                raise Error("authorization_required", 403)
+            catalog = await self.client.catalog()
+            if payload["model"] not in catalog["models"][payload["capability"]]:
+                raise Error("capability_not_supported")
+            quote = self.client.quote(payload)
+            if not self.admitted():
+                raise Error("gpu_lease_lost", 503)
+            if not self.q.admit(row["id"], quote, acct["credits"]):
+                return
+            try:
+                result = await self.client.tool("gflow_generate_" + payload["capability"], model=payload["model"], **args)
+            except Error:
+                result = {}
+            media = result.get("flow_media_id")
+            if isinstance(media, str) and ID.fullmatch(media):
+                self.q.outcome(row["id"], True, media=media)
+                await self.collect(self.q.find("id", row["id"]), result)
+            else:
+                error = result.get("error", {})
+                error = error if isinstance(error, dict) else {}
+                unusual = (str(error.get("code", "")).lower() == "unusual_activity"
+                           or "PUBLIC_ERROR_UNUSUAL_ACTIVITY" in str(error.get("detail", "")))
+                rejected = unusual or error.get("charged") == "no" or error.get("accepted") is False
+                self.q.outcome(row["id"], False if rejected else None,
+                               reason="unusual_activity" if unusual else "rejected" if rejected else "acceptance_unknown")
+        finally:
+            self._inflight.discard(row["id"])
 
     async def collect(self, row, result=None):
         if not result or not result.get("files"):

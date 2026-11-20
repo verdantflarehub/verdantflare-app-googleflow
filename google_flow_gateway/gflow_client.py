@@ -1,4 +1,5 @@
 """Public tools on the loopback MCP service. Never expose raw upstream errors."""
+import asyncio
 import json
 from contextlib import asynccontextmanager
 import httpx2
@@ -6,12 +7,14 @@ from mcp.client.streamable_http import streamable_http_client
 from .policy import Error
 
 MODELS = {"image": {"nano2", "nano21", "nano-pro"}, "video": {"veo-lite", "veo-fast", "veo-quality", "omni-flash"}}
+UNAUTHENTICATED_STATUSES = {"unauthenticated", "not_authenticated", "expired", "signed_out", "logged_out"}
 
 
 class GFlow:
     def __init__(self, session, prices=None):
         self.session = session
         self.prices = prices or {}
+        self._account_lock = asyncio.Lock()
 
     async def tool(self, name, **arguments):
         try:
@@ -27,16 +30,20 @@ class GFlow:
             raise Error("channel_unavailable", 503) from None
 
     async def account(self):
-        auth = await self.tool("gflow_auth_status")
-        if auth.get("status") in ("throttled", "error", "unavailable"):
-            raise Error("channel_unavailable", 503)
-        if auth.get("status") != "authenticated":
-            return {"authorized": False, "credits": None}
-        result = await self.tool("gflow_get_credits")
-        balance = result.get("credits")
-        if type(balance) is not int or balance < 0:
-            raise Error("balance_unavailable", 503)
-        return {"authorized": True, "credits": balance, "tier": result.get("service_tier")}
+        async with self._account_lock:
+            auth = await self.tool("gflow_auth_status")
+            status = auth.get("status")
+            if status in ("throttled", "error", "unavailable", "profile_locked"):
+                raise Error("channel_unavailable", 503)
+            if status in UNAUTHENTICATED_STATUSES:
+                return {"authorized": False, "credits": None}
+            if status != "authenticated":
+                raise Error("channel_unavailable", 503)
+            result = await self.tool("gflow_get_credits")
+            balance = result.get("credits")
+            if type(balance) is not int or balance < 0:
+                raise Error("balance_unavailable", 503)
+            return {"authorized": True, "credits": balance, "tier": result.get("service_tier")}
 
     async def catalog(self):
         raw = await self.tool("gflow_list_models")
