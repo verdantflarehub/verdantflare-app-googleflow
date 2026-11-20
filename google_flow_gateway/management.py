@@ -1,10 +1,23 @@
 import json
+import mimetypes
+import os
+from pathlib import Path
 from starlette.applications import Starlette
 from starlette.responses import Response
 from starlette.routing import Route
 
 from .policy import DEFAULTS, Error
 from .server import ID, bearer, handle_error, header, object_body, reply, view
+
+_WEBCLIENT_SUFFIXES = {".html", ".js", ".css", ".svg", ".png", ".ico", ".woff", ".woff2", ".ttf", ".json"}
+_WEBCLIENT_MAX_BYTES = 4 * 1024 * 1024
+_DEFAULT_DESKTOP_SETTINGS = {
+    "BDWIND_FRAMERATE": 30,
+    "BDWIND_VIDEO_BITRATE": 4000,
+    "BDWIND_AUDIO_BITRATE": 64000,
+    "BDWIND_ENCODER": "nvh264enc",
+    "BDWIND_RESOLUTION": "1280x720",
+}
 
 
 def management(g, token, station, assets=None, lease=None, desktop=None):
@@ -64,6 +77,19 @@ def management(g, token, station, assets=None, lease=None, desktop=None):
             call_id = request.path_params["value"]
             q.reconcile(call_id, data["revision"], data.get("action"), actor, media_id)
             return reply(view(q.find("id", call_id)))
+        if path == "/desktop/settings":
+            return reply(dict(_DEFAULT_DESKTOP_SETTINGS))
+        if path.startswith("/desktop/assets/"):
+            root = Path(os.environ.get("GOOGLE_FLOW_WEB_ROOT", "/app/webclient")).resolve()
+            rel = request.path_params.get("asset") or "index.html"
+            target = (root / rel).resolve()
+            if root not in target.parents or not target.is_file() or target.suffix not in _WEBCLIENT_SUFFIXES or target.stat().st_size > _WEBCLIENT_MAX_BYTES:
+                raise Error("not_found", 404)
+            mime = mimetypes.guess_type(target.name)[0] or "application/octet-stream"
+            return Response(target.read_bytes(), media_type=mime, headers={
+                "Cache-Control": "no-store",
+                "X-Content-Type-Options": "nosniff",
+            })
         action = request.path_params.get("action", "status")
         if action == "check-auth":
             return reply(await g.client.account())
@@ -80,6 +106,7 @@ def management(g, token, station, assets=None, lease=None, desktop=None):
         return reply(result)
 
     routes = [Route(path, handle) for path in ("/overview", "/calls", "/audit", "/desktop",
+              "/desktop/settings", "/desktop/assets/{asset:path}",
               "/internal/dashboard-declaration", "/internal/dashboard-index", "/internal/dashboard/{asset:path}")]
     routes.append(Route("/policy", handle, methods=["PUT", "GET"]))
     routes += [Route(path, handle, methods=["POST"]) for path in ("/policy/defaults", "/channel/{action}",

@@ -11,6 +11,7 @@ ENV GFLOW_CLI_TELEMETRY=0 DO_NOT_TRACK=1 GFLOW_CLI_UPDATE_CHECK=false \
     GFLOW_CLI_INCIDENT_CAPTURE=false GFLOW_CLI_HISTORY_PROMPTS=redacted GFLOW_CLI_BROWSER_ENGINE=playwright \
     GFLOW_CLI_HOME=/data/google-flow/gflow GFLOW_CLI_OUTPUT_DIR=/data/google-flow/output \
     GOOGLE_FLOW_STATE_DIR=/data/google-flow/state GOOGLE_FLOW_DASHBOARD_DIR=/app/dashboard \
+    GOOGLE_FLOW_WEB_ROOT=/app/webclient \
     GOOGLE_FLOW_DESKTOP_CONTROL=/app/runtime/desktop-control.py \
     GOOGLE_FLOW_RTC_FILE=/run/user/1000/google-flow-rtc.json \
     PATH="/opt/google-flow/bin:${PATH}"
@@ -21,7 +22,10 @@ RUN python3 -m venv /opt/google-flow && python -m pip install --no-cache-dir . &
     python -c "from importlib.metadata import version; assert version('gflow-cli') == '0.101.0'" && \
     python -m google_flow_gateway.dashboard --source dashboard-source --output dashboard && rm -rf dashboard-source
 COPY runtime/ runtime/
-RUN chmod 755 runtime/entrypoint.sh runtime/desktop-control.py && test "$(id -u beagle)" = 1000
+RUN cp -a /opt/bdwind/webrtc /app/webclient && \
+    cp runtime/webclient/embed.js /app/webclient/studio-embed.js && \
+    python runtime/webclient/prepare.py /app/webclient && \
+    chmod 755 runtime/entrypoint.sh runtime/desktop-control.py && test "$(id -u beagle)" = 1000
 USER 1000:1000
 EXPOSE 8000 8001 48083
 ENTRYPOINT ["/app/runtime/entrypoint.sh"]
