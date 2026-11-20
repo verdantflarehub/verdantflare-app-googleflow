@@ -75,6 +75,14 @@ async def run():
 
     async def desktop(action):
         if action == "turn":
+            rtc_path = env.get("GOOGLE_FLOW_RTC_FILE")
+            if rtc_path and Path(rtc_path).is_file():
+                try:
+                    expires_at = json.loads(Path(rtc_path).read_text(encoding="utf-8")).get("expires_at", 0)
+                except (OSError, ValueError):
+                    expires_at = 0
+                if expires_at - time.time() < 120:
+                    await command(hook, "open")
             return credentials(env["GOOGLE_FLOW_TURN_URLS"].split(","), env["GOOGLE_FLOW_TURN_SECRET"])
         if action not in ("status", "open", "close", "login"):
             raise Error("invalid_field", field="action")

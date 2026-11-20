@@ -54,11 +54,12 @@ class GFlow:
         return amount
 
 
-def local_session(token, port=18000):
+def local_session(token, port=18000, timeout=600.0):
     @asynccontextmanager
     async def session():
         async with httpx2.AsyncClient(headers={"Authorization": "Bearer " + token},
-                                      trust_env=False, follow_redirects=False) as http:
+                                      trust_env=False, follow_redirects=False,
+                                      timeout=httpx2.Timeout(timeout, connect=10.0)) as http:
             async with streamable_http_client(f"http://127.0.0.1:{port}/mcp", http_client=http) as streams:
                 from mcp.client import ClientSession
                 async with ClientSession(*streams) as client:
