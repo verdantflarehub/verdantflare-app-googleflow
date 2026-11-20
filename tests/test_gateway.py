@@ -417,3 +417,14 @@ class GatewayTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_video_artifact_commit_response_lost(self):
         await self.artifact_response_loss("commit")
+
+    async def test_veo_quality_rejects_reference_images_at_gateway(self):
+        data = self.payload("vq-ref", "/v1/jobs") | {
+            "model": "veo-quality",
+            "capability": "video",
+            "parameters": {"prompt": "dance", "aspect": "9:16", "duration": 8, "reference_images": ["a" * 64]},
+        }
+        response = await self.x.post("/v1/jobs", json=data)
+        self.assertEqual(response.status_code, 422)
+        self.assertEqual(response.json(), {"code": "invalid_field", "field": "reference_images"})
+        self.assertEqual(self.fake.count, 0)

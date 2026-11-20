@@ -5,7 +5,7 @@ from starlette.applications import Starlette
 from starlette.responses import JSONResponse, Response
 from starlette.routing import Route
 
-from .gflow_client import MODELS
+from .gflow_client import MODELS, VIDEO_MODEL_LIMITS
 from .media import MAX_SIZE
 from .policy import Error
 from .queue import encode
@@ -95,10 +95,13 @@ class Gateway:
             raise Error("invalid_field", field="prompt")
         if args.get("aspect", "16:9") not in (("16:9", "9:16", "1:1") if kind == "image" else ("16:9", "9:16")):
             raise Error("invalid_field", field="aspect")
-        if "duration" in args and (kind != "video" or args["duration"] not in (4, 6, 8)):
-            raise Error("invalid_field", field="duration")
+        if "duration" in args:
+            allowed_durations = VIDEO_MODEL_LIMITS.get(model, {}).get("durations", (4, 6, 8))
+            if kind != "video" or args["duration"] not in allowed_durations:
+                raise Error("invalid_field", field="duration")
         refs = args.get("reference_images", [])
-        if not isinstance(refs, list) or len(refs) > 3 or any(not isinstance(i, str) or not re.fullmatch("[a-f0-9]{64}", i) for i in refs):
+        max_refs = VIDEO_MODEL_LIMITS[model]["max_refs"] if kind == "video" else 3
+        if not isinstance(refs, list) or len(refs) > max_refs or any(not isinstance(i, str) or not re.fullmatch("[a-f0-9]{64}", i) for i in refs):
             raise Error("invalid_field", field="reference_images")
         limit = data.get("budget_limit")
         if limit is not None and (type(limit) is not int or not 0 <= limit <= 2**31-1):
