@@ -128,6 +128,8 @@ class Gateway:
                 args["reference_images"] = paths
                 if payload["capability"] == "video":
                     args["mode"] = "r2v"
+            if payload["capability"] == "video" and payload["model"].startswith("veo-") and args.get("duration") == 8:
+                args.pop("duration", None)
             acct = await self.client.account()
             if not acct["authorized"]:
                 with self.q.transaction():
