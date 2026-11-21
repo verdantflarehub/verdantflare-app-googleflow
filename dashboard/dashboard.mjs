@@ -48,7 +48,7 @@ async function refresh() {
       content.innerHTML='<section class="card"><h2>登录桌面</h2><p>'+(data.open?'桌面会话已开启':data.available?'桌面未打开':'桌面服务尚未接入')+'</p>'+button(data.open?'close':'open',data.open?labels.close:labels.open)+(data.open?button('login',labels.login):'')+button('check-auth',labels['check-auth'])+'</section>';
       if(data.open && typeof data.viewer_path==='string' && /^\/[a-zA-Z0-9/_-]+$/.test(data.viewer_path) && !data.viewer_path.startsWith('//')){
         const frame=document.createElement('iframe');
-        frame.title='KDE6 登录桌面'; frame.className='desktop-view'; frame.src=data.viewer_path;
+        frame.title='KasmVNC 登录桌面'; frame.className='desktop-view'; frame.src=data.viewer_path;
         content.append(frame);
       }
     }
@@ -103,4 +103,6 @@ if(sdk?.theme?.subscribe)subscriptions.push(sdk.theme.subscribe(theme=>{
   document.documentElement.dataset.theme=theme;
 }));
 addEventListener('pagehide',()=>{++revision;for(const unsubscribe of subscriptions)unsubscribe();},{once:true});
+host?.ready?.();
+host?.resize?.(document.documentElement.scrollHeight);
 refresh();
