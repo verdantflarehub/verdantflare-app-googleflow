@@ -8,11 +8,12 @@ from mcp.client.streamable_http import streamable_http_client
 from .policy import Error
 
 MODELS = {"image": {"nano2", "nano21", "nano-pro"}, "video": {"veo-lite", "veo-fast", "veo-quality", "omni-1.2-flash"}}
+IMAGE_UPSCALES = ("2k", "4k")
 VIDEO_MODEL_LIMITS = {
-    "veo-lite": {"max_refs": 3, "max_video_refs": 0, "durations": (4, 6, 8)},
-    "veo-fast": {"max_refs": 3, "max_video_refs": 0, "durations": (4, 6, 8)},
-    "veo-quality": {"max_refs": 0, "max_video_refs": 0, "durations": (4, 6, 8)},
-    "omni-1.2-flash": {"max_refs": 7, "max_video_refs": 1, "durations": (3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15)},
+    "veo-lite": {"max_refs": 3, "max_video_refs": 0, "durations": (4, 6, 8), "upscales": ()},
+    "veo-fast": {"max_refs": 3, "max_video_refs": 0, "durations": (4, 6, 8), "upscales": ("1080p",)},
+    "veo-quality": {"max_refs": 0, "max_video_refs": 0, "durations": (4, 6, 8), "upscales": ("1080p",)},
+    "omni-1.2-flash": {"max_refs": 7, "max_video_refs": 1, "durations": (3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15), "upscales": ("1080p",)},
 }
 UNAUTHENTICATED_STATUSES = {"unauthenticated", "not_authenticated", "expired", "signed_out", "logged_out"}
 

@@ -5,7 +5,7 @@ from starlette.applications import Starlette
 from starlette.responses import JSONResponse, Response
 from starlette.routing import Route
 
-from .gflow_client import MODELS, VIDEO_MODEL_LIMITS
+from .gflow_client import IMAGE_UPSCALES, MODELS, VIDEO_MODEL_LIMITS
 from .media import MAX_SIZE
 from .policy import Error
 from .queue import encode
@@ -53,15 +53,19 @@ async def handle_error(request, exc):
     return reply({"code": exc.code, "field": exc.field}, exc.status)
 
 
-def view(row):
+def view(row, result_meta=None):
     if row is None:
         raise Error("not_found", 404)
     accepted = None if row["accepted"] is None else bool(row["accepted"])
     payload = json.loads(row["payload"])
-    return dict(call_id=row["id"], request_id=row["key"], accepted=accepted, state=row["state"],
+    data = dict(call_id=row["id"], request_id=row["key"], accepted=accepted, state=row["state"],
                 started=row["started"], model=payload.get("model"), capability=payload.get("capability"),
                 status=row["state"], reason_code=row["reason"], revision=row["revision"],
                 reserved=row["reserve"], credits=None if row["reason"] == "charge_unconfirmed" else row["spent"])
+    if isinstance(result_meta, dict) and result_meta.get("upscale_status"):
+        data["upscale_status"] = result_meta["upscale_status"]
+        data["upscale_target"] = result_meta.get("upscale_target")
+    return data
 
 
 class Gateway:
@@ -89,8 +93,9 @@ class Gateway:
         kind, model, args = data.get("capability"), data.get("model"), data.get("parameters")
         if not isinstance(kind, str) or not isinstance(model, str) or model not in MODELS.get(kind, ()):
             raise Error("capability_not_supported")
-        if not isinstance(args, dict) or set(args) - {"prompt", "aspect", "reference_images", "reference_videos", "duration"}:
+        if not isinstance(args, dict) or set(args) - {"prompt", "aspect", "reference_images", "reference_videos", "duration", "upscale"}:
             raise Error("invalid_field", field="parameters")
+        args = dict(args)
         if not isinstance(args.get("prompt"), str) or not 1 <= len(args["prompt"].strip()) <= 5000:
             raise Error("invalid_field", field="prompt")
         if args.get("aspect", "16:9") not in (("16:9", "9:16", "1:1") if kind == "image" else ("16:9", "9:16")):
@@ -99,6 +104,13 @@ class Gateway:
             allowed_durations = VIDEO_MODEL_LIMITS.get(model, {}).get("durations", (4, 6, 8))
             if kind != "video" or args["duration"] not in allowed_durations:
                 raise Error("invalid_field", field="duration")
+        if "upscale" in args:
+            if args["upscale"] is None:
+                args.pop("upscale")
+            else:
+                allowed_upscales = VIDEO_MODEL_LIMITS.get(model, {}).get("upscales", ()) if kind == "video" else IMAGE_UPSCALES
+                if not isinstance(args["upscale"], str) or args["upscale"] not in allowed_upscales:
+                    raise Error("invalid_field", field="upscale")
         refs = args.get("reference_images", [])
         max_refs = VIDEO_MODEL_LIMITS[model]["max_refs"] if kind == "video" else 3
         if not isinstance(refs, list) or len(refs) > max_refs or any(not isinstance(i, str) or not re.fullmatch("[a-f0-9]{64}", i) for i in refs):
@@ -142,6 +154,7 @@ class Gateway:
             paths = self.references(row["owner"], payload)
             vpaths = self.video_references(row["owner"], payload)
             args.pop("reference_videos", None)
+            args.pop("upscale", None)
             if paths:
                 args["reference_images"] = paths
                 if payload["capability"] == "video":
@@ -198,10 +211,32 @@ class Gateway:
             paths = result["files"]
         if not paths or not paths[0]:
             return
-        kind = json.loads(row["payload"])["capability"]
+        payload = json.loads(row["payload"])
+        kind = payload["capability"]
+        upscale = payload.get("parameters", {}).get("upscale")
         from pathlib import Path
-        mime = "video/mp4" if kind == "video" else {".jpg": "image/jpeg", ".jpeg": "image/jpeg", ".webp": "image/webp"}.get(Path(paths[0]).suffix.lower(), "image/png")
-        meta = self.media.collect(paths[0], self.output, mime)
+        chosen_path = paths[0]
+        upscale_status = None
+        if upscale and row["media"]:
+            up_tool = "gflow_upscale_video" if kind == "video" else "gflow_upscale_image"
+            up_args = {"media_id": row["media"], "scale": upscale}
+            if isinstance(result, dict) and isinstance(result.get("project_id"), str) and result["project_id"]:
+                up_args["project"] = result["project_id"]
+            try:
+                up = await self.client.tool(up_tool, **up_args)
+                up_path = up.get("path") if isinstance(up, dict) else None
+                if isinstance(up_path, str) and Path(up_path).is_file():
+                    chosen_path = up_path
+                    upscale_status = "upscaled"
+                else:
+                    upscale_status = "fallback_original"
+            except Exception:
+                upscale_status = "fallback_original"
+        mime = "video/mp4" if kind == "video" else {".jpg": "image/jpeg", ".jpeg": "image/jpeg", ".webp": "image/webp"}.get(Path(chosen_path).suffix.lower(), "image/png")
+        meta = self.media.collect(chosen_path, self.output, mime)
+        if upscale_status:
+            meta["upscale_status"] = upscale_status
+            meta["upscale_target"] = upscale
         spent = result.get("credits_used")
         confirmed = type(spent) is int and spent >= 0
         with self.q.transaction():
@@ -212,7 +247,11 @@ class Gateway:
             self.q.db.execute("UPDATE calls SET state='succeeded',reason=?,spent=?,reserve=? WHERE id=?",
                               (None if confirmed else "charge_unconfirmed", spent if confirmed else 0,
                                0 if confirmed else current["reserve"], row["id"]))
-            self.q.audit("system", "succeeded", {"call_id": row["id"], "actual_credits": spent if confirmed else None})
+            audit_detail = {"call_id": row["id"], "actual_credits": spent if confirmed else None}
+            if upscale_status:
+                audit_detail["upscale_status"] = upscale_status
+                audit_detail["upscale_target"] = upscale
+            self.q.audit("system", "succeeded", audit_detail)
 
     async def tick(self):
         import asyncio
@@ -257,16 +296,18 @@ def execution(g, token):
             g.video_references(owner, payload)
             row = g.q.intent(owner, key, payload)
             await g.dispatch(row)
-            return reply(view(g.q.find("id", row["id"], owner)))
+            updated = g.q.find("id", row["id"], owner)
+            res_row = g.q.db.execute("SELECT metadata FROM results WHERE id=?", (updated["id"],)).fetchone()
+            return reply(view(updated, json.loads(res_row[0]) if res_row else None))
         lookup = request.path_params["value"]
         column = "key" if path.startswith(("/v1/jobs/", "/v1/calls/by-idempotency/")) else "id"
         row = g.q.find(column, lookup, owner)
-        data = view(row)
+        res_row = g.q.db.execute("SELECT metadata FROM results WHERE id=?", (row["id"],)).fetchone() if row else None
+        meta = json.loads(res_row[0]) if res_row else None
+        data = view(row, meta)
         if path.endswith(("/content", "/result")):
-            result = g.q.db.execute("SELECT metadata FROM results WHERE id=?", (row["id"],)).fetchone()
-            if not result:
+            if not meta:
                 raise Error("result_not_ready", 409)
-            meta = json.loads(result[0])
             raw = g.media.read(meta["sha256"])
             return Response(raw, media_type=meta["mime_type"], headers={"X-Content-SHA256": meta["sha256"], "Cache-Control": "no-store"})
         return reply(data)
