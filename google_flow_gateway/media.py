@@ -84,6 +84,8 @@ class Media:
             ext = ".jpg"
         elif len(data) >= 12 and data[:4] == b"RIFF" and data[8:12] == b"WEBP":
             ext = ".webp"
+        elif len(data) >= 12 and data[4:8] == b"ftyp":
+            ext = ".mp4"
         else:
             raise Error("invalid_media")
         target = self.root / f"{digest}{ext}"
@@ -105,6 +107,6 @@ class Media:
 
     def cleanup(self, before, protected):
         for path in self.root.iterdir():
-            match = re.fullmatch(r"([a-f0-9]{64})(?:\.(?:png|jpg|webp))?", path.name)
+            match = re.fullmatch(r"([a-f0-9]{64})(?:\.(?:png|jpg|webp|mp4))?", path.name)
             if match and match.group(1) not in protected and path.stat().st_mtime < before:
                 path.unlink(missing_ok=True)

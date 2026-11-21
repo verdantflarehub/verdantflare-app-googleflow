@@ -48,12 +48,19 @@ def management(g, token, station, assets=None, lease=None, desktop=None):
                     account = await g.client.account()
             except Error:
                 account = {"authorized": None, "credits": None}
+            desktop_state = {"open": False, "available": False}
+            if desktop:
+                try:
+                    desktop_state = await desktop("status")
+                except Error:
+                    desktop_state = {"open": False, "available": False}
             with q.transaction():
                 status = q.status()
                 timed_out = bool(status.get("reason") == "gpu_lease_lost" and q.db.execute(
                     "SELECT 1 FROM audit WHERE action='lease_reconcile_timeout' AND time>=? LIMIT 1",
                     (status["since"],)).fetchone())
                 return reply(status | {"account": account, "today": q.usage(), "policy": q.setting("policy"),
+                                      "desktop": desktop_state,
                                       "lease_valid": True if lease is None else bool(lease.valid),
                                       "no_gpu": lease is None,
                                       "lease_reconcile_timeout": timed_out})

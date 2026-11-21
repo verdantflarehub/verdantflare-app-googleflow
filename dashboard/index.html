@@ -1,8 +1,12 @@
 <!doctype html>
 <html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
 <title>Google Flow · 会员渠道管理</title><link rel="stylesheet" href="./dashboard.css"></head>
-<body><main class="main" id="dashboard"><header class="context"><div><p class="subline">应用中心 / Google Flow</p><h1>Google Flow</h1></div></header>
+<body><main class="main" id="dashboard">
+<header class="context"><div class="gf-head-row"><div><p class="subline" id="breadcrumb">应用中心 / 渠道管理 / Google Flow</p><h1 id="page-title">Google Flow</h1></div><div class="actions" id="head-actions"></div></div></header>
 <nav id="tabs" class="tabs" aria-label="渠道管理"></nav><p id="notice" role="status"></p>
-<section id="content" aria-live="polite"></section><dialog id="confirm"><form method="dialog"><h2 id="question"></h2>
-<label id="media-label" hidden>Flow 媒体 ID <input id="media"></label><div class="actions"><button value="cancel">取消</button><button value="yes">确认</button></div></form></dialog></main>
+<section id="content" aria-live="polite"></section>
+<dialog id="confirm"><form method="dialog"><h2 id="question"></h2>
+<label id="media-label" hidden>Flow 媒体 ID <input id="media"></label>
+<div class="actions"><button value="cancel">取消</button><button value="yes">确认</button></div></form></dialog>
+</main>
 <script type="module" src="./dashboard.mjs"></script></body></html>

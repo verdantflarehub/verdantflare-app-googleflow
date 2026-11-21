@@ -1428,3 +1428,23 @@ button.quiet:not(.g-icon-button)::after,
     transition: none !important;
   }
 }
+
+
+/* Google Flow v0.2.8 dashboard layout extensions */
+.gf-head-row { display: flex; align-items: flex-end; justify-content: space-between; gap: 16px; width: 100%; }
+.gf-bc-link { background: none; border: none; padding: 0; color: var(--accent); cursor: pointer; font: inherit; font-weight: 500; }
+.gf-bc-link:hover { text-decoration: underline; }
+.gf-acct-title { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+.gf-acct-title h2 { margin: 0; font-size: 16px; font-weight: 600; }
+.gf-badge { display: inline-flex; align-items: center; padding: 2px 9px; border-radius: 999px; font-size: 12px; font-weight: 500; }
+.gf-badge.ok { background: var(--accent-soft); color: var(--accent); }
+.gf-badge.warn { background: var(--amber-soft); color: var(--amber); }
+.gf-badge.paused { background: var(--danger-soft); color: var(--danger); }
+.gf-banner { display: flex; align-items: center; justify-content: space-between; gap: 12px; flex-wrap: wrap; padding: 12px 16px; border-radius: 10px; margin-bottom: 14px; background: var(--accent-soft); border: 1px solid rgba(8, 126, 96, 0.28); }
+.gf-primary { background: var(--accent) !important; border-color: var(--accent) !important; color: #fff !important; }
+.gf-fact-sm { font-size: 15px !important; }
+.gf-note { margin: 4px 0 12px; font-size: 13px; color: var(--muted); }
+.gf-mono { display: block; font-family: ui-monospace, SFMono-Regular, Consolas, monospace; font-size: 12px; color: var(--muted); font-weight: 400; }
+.gf-specs { display: flex; flex-wrap: wrap; gap: 6px 14px; font-size: 12.5px; }
+.gf-spec { display: inline-flex; align-items: baseline; gap: 3px; }
+.gf-spec b { color: var(--muted); font-weight: 500; }

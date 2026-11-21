@@ -367,7 +367,7 @@ class GatewayTests(unittest.IsolatedAsyncioTestCase):
         build(Path("dashboard"), self.root/"bundle", __version__)
         assets = DashboardAssets(self.root/"bundle")
         modules = [assets.asset(k)[0].decode() for k in assets.files if k.endswith(".mjs")]
-        for label in ("概览", "策略", "调用记录", "审计日志", "登录桌面"):
+        for label in ("账号", "调用记录", "审计日志", "模型与价目", "策略", "授权"):
             self.assertIn(label, "".join(modules))
         self.assertIn("sdk.app.request", "".join(modules))
         self.assertEqual(json.loads(assets.declaration)["appId"], "google-flow")

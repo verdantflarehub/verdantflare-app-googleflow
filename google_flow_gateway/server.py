@@ -89,7 +89,7 @@ class Gateway:
         kind, model, args = data.get("capability"), data.get("model"), data.get("parameters")
         if not isinstance(kind, str) or not isinstance(model, str) or model not in MODELS.get(kind, ()):
             raise Error("capability_not_supported")
-        if not isinstance(args, dict) or set(args) - {"prompt", "aspect", "reference_images", "duration"}:
+        if not isinstance(args, dict) or set(args) - {"prompt", "aspect", "reference_images", "reference_videos", "duration"}:
             raise Error("invalid_field", field="parameters")
         if not isinstance(args.get("prompt"), str) or not 1 <= len(args["prompt"].strip()) <= 5000:
             raise Error("invalid_field", field="prompt")
@@ -103,6 +103,10 @@ class Gateway:
         max_refs = VIDEO_MODEL_LIMITS[model]["max_refs"] if kind == "video" else 3
         if not isinstance(refs, list) or len(refs) > max_refs or any(not isinstance(i, str) or not re.fullmatch("[a-f0-9]{64}", i) for i in refs):
             raise Error("invalid_field", field="reference_images")
+        vrefs = args.get("reference_videos", [])
+        max_vrefs = VIDEO_MODEL_LIMITS[model].get("max_video_refs", 0) if kind == "video" else 0
+        if not isinstance(vrefs, list) or len(vrefs) > max_vrefs or any(not isinstance(i, str) or not re.fullmatch("[a-f0-9]{64}", i) for i in vrefs):
+            raise Error("invalid_field", field="reference_videos")
         limit = data.get("budget_limit")
         if limit is not None and (type(limit) is not int or not 0 <= limit <= 2**31-1):
             raise Error("invalid_field", field="budget_limit")
@@ -110,6 +114,15 @@ class Gateway:
 
     def references(self, owner, payload):
         refs = payload["parameters"].get("reference_images", [])
+        paths = []
+        for ref in refs:
+            if not self.q.db.execute("SELECT 1 FROM inputs WHERE owner=? AND digest=?", (owner, ref)).fetchone():
+                raise Error("forbidden", 403)
+            paths.append(str(self.media.path_with_ext(ref)))
+        return paths
+
+    def video_references(self, owner, payload):
+        refs = payload["parameters"].get("reference_videos", [])
         paths = []
         for ref in refs:
             if not self.q.db.execute("SELECT 1 FROM inputs WHERE owner=? AND digest=?", (owner, ref)).fetchone():
@@ -127,6 +140,8 @@ class Gateway:
             payload = json.loads(row["payload"])
             args = payload["parameters"].copy()
             paths = self.references(row["owner"], payload)
+            vpaths = self.video_references(row["owner"], payload)
+            args.pop("reference_videos", None)
             if paths:
                 args["reference_images"] = paths
                 if payload["capability"] == "video":
@@ -147,7 +162,17 @@ class Gateway:
             if not self.q.admit(row["id"], quote, acct["credits"]):
                 return
             try:
-                result = await self.client.tool("gflow_generate_" + payload["capability"], model=payload["model"], **args)
+                if vpaths and payload["capability"] == "video":
+                    result = await self.client.generate_video_edit(
+                        prompt=args["prompt"],
+                        video_path=vpaths[0],
+                        reference_images=paths,
+                        aspect=args.get("aspect", "16:9"),
+                        duration=args.get("duration"),
+                        output_dir=self.output,
+                    )
+                else:
+                    result = await self.client.tool("gflow_generate_" + payload["capability"], model=payload["model"], **args)
             except Error:
                 result = {}
             media = result.get("flow_media_id")
@@ -229,6 +254,7 @@ def execution(g, token):
             if path == "/v1/cost":
                 return reply({"credits": g.client.quote(payload)})
             g.references(owner, payload)
+            g.video_references(owner, payload)
             row = g.q.intent(owner, key, payload)
             await g.dispatch(row)
             return reply(view(g.q.find("id", row["id"], owner)))

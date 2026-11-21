@@ -9,10 +9,10 @@ from .policy import Error
 
 MODELS = {"image": {"nano2", "nano21", "nano-pro"}, "video": {"veo-lite", "veo-fast", "veo-quality", "omni-1.2-flash"}}
 VIDEO_MODEL_LIMITS = {
-    "veo-lite": {"max_refs": 3, "durations": (4, 6, 8)},
-    "veo-fast": {"max_refs": 3, "durations": (4, 6, 8)},
-    "veo-quality": {"max_refs": 0, "durations": (4, 6, 8)},
-    "omni-1.2-flash": {"max_refs": 7, "durations": (3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15)},
+    "veo-lite": {"max_refs": 3, "max_video_refs": 0, "durations": (4, 6, 8)},
+    "veo-fast": {"max_refs": 3, "max_video_refs": 0, "durations": (4, 6, 8)},
+    "veo-quality": {"max_refs": 0, "max_video_refs": 0, "durations": (4, 6, 8)},
+    "omni-1.2-flash": {"max_refs": 7, "max_video_refs": 1, "durations": (3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15)},
 }
 UNAUTHENTICATED_STATUSES = {"unauthenticated", "not_authenticated", "expired", "signed_out", "logged_out"}
 
@@ -46,7 +46,7 @@ class GFlow:
             if status in ("throttled", "error", "unavailable", "profile_locked"):
                 raise Error("channel_unavailable", 503)
             if status in UNAUTHENTICATED_STATUSES:
-                value = {"authorized": False, "credits": None, "email": auth.get("user_email"), "tier": None}
+                value = {"authorized": False, "credits": None, "email": auth.get("user_email"), "tier": None, "updated_at": time.time()}
                 self._account_cache = value
                 self._account_cached_at = time.monotonic()
                 return dict(value)
@@ -61,10 +61,27 @@ class GFlow:
                 "credits": balance,
                 "email": result.get("email") or auth.get("user_email"),
                 "tier": result.get("service_tier") or result.get("user_paygate_tier") or result.get("sku"),
+                "updated_at": time.time(),
             }
             self._account_cache = value
             self._account_cached_at = time.monotonic()
             return dict(value)
+
+    async def generate_video_edit(self, *, prompt, video_path, reference_images, aspect, duration, output_dir):
+        from pathlib import Path
+        from .video_edit import generate_video_edit as _run_edit
+        async with self._account_lock:
+            try:
+                return await _run_edit(
+                    prompt=prompt,
+                    video_path=Path(video_path),
+                    reference_images=[Path(p) for p in reference_images],
+                    aspect=aspect,
+                    duration=duration,
+                    output_dir=Path(output_dir),
+                )
+            except Exception as exc:
+                return {"status": "failed", "error": {"code": "video_edit_failed", "detail": str(exc)}}
 
     def trigger_account_refresh(self):
         if self._account_refresh_task is None or self._account_refresh_task.done():
