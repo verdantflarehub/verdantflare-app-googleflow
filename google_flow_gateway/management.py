@@ -42,7 +42,10 @@ def management(g, token, station, assets=None, lease=None, desktop=None):
         q = g.q
         if path == "/overview":
             try:
-                account = await g.client.account()
+                if hasattr(g.client, "cached_account"):
+                    account = await g.client.cached_account()
+                else:
+                    account = await g.client.account()
             except Error:
                 account = {"authorized": None, "credits": None}
             with q.transaction():
@@ -52,6 +55,7 @@ def management(g, token, station, assets=None, lease=None, desktop=None):
                     (status["since"],)).fetchone())
                 return reply(status | {"account": account, "today": q.usage(), "policy": q.setting("policy"),
                                       "lease_valid": True if lease is None else bool(lease.valid),
+                                      "no_gpu": lease is None,
                                       "lease_reconcile_timeout": timed_out})
         if path == "/policy":
             if request.method == "PUT":

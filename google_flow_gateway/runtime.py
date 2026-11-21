@@ -133,6 +133,10 @@ async def run():
             daemon = await asyncio.create_subprocess_exec("gflow", "serve", "--host", "127.0.0.1",
                  "--port", "18000", env=process_env, stdout=asyncio.subprocess.DEVNULL,
                  stderr=asyncio.subprocess.DEVNULL)
+            async def _warmup():
+                await asyncio.sleep(3)
+                client.trigger_account_refresh()
+            asyncio.create_task(_warmup())
 
         async def lifecycle():
             while not stop.is_set():

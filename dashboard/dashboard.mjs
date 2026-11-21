@@ -18,7 +18,7 @@ function overview(data) {
     (data.lease_reconcile_timeout?' · 旧 GPU 租约对账超时':'')+' '+button('resume',labels.resume)+button('clear-cooldown',labels['clear-cooldown'])+'</div>' : '')+
     '<section class="card"><div class="section-head"><h2>渠道状态 · '+(paused?'已暂停':'运行中')+'</h2>'+(!paused?button('pause',labels.pause):'')+'</div><p>授权状态 · '+
     (data.account.authorized === null ? '无法观测' : data.account.authorized?'会话有效':'需要登录')+'</p><div class="c-facts">'+
-    Object.entries(facts).map(([k,v])=>'<div><small>'+k+'</small><strong>'+escape(v)+'</strong></div>').join('')+'</div><div class="g-account-footer"><small>策略 · 并发 '+escape(data.policy.concurrency)+' · 最小间隔 '+escape(data.policy.min_interval_seconds)+' 秒 · '+(data.lease_valid?'已持有 GPU 租约':'GPU 尚未准入')+'</small><div class="actions">'+button('reset-count',labels['reset-count'])+'</div></div></section>';
+    Object.entries(facts).map(([k,v])=>'<div><small>'+k+'</small><strong>'+escape(v)+'</strong></div>').join('')+'</div><div class="g-account-footer"><small>策略 · 并发 '+escape(data.policy.concurrency)+' · 最小间隔 '+escape(data.policy.min_interval_seconds)+' 秒 · '+(data.no_gpu?'无 GPU 独立模式':data.lease_valid?'已持有 GPU 租约':'GPU 尚未准入')+'</small><div class="actions">'+button('reset-count',labels['reset-count'])+'</div></div></section>';
 }
 function policy(data) {
   return '<h2>节奏与风控策略</h2><p>四个限额项填 0 表示不限制。冷却填 0 表示只暂停，需手动恢复。</p><form id="policy-form"><section class="card g-form-grid">'+
