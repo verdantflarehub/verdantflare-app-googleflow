@@ -59,6 +59,7 @@ def handle(action):
         change("kasmvnc", True)
         wait_port(KASMVNC_PORT, timeout=10.0)
         change("openbox", True)
+        change("flow-login", True)
     elif action == "login":
         if not running("kasmvnc"):
             raise RuntimeError("open desktop first")

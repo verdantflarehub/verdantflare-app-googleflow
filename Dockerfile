@@ -5,7 +5,7 @@ USER root
 WORKDIR /app
 RUN apt-get update && apt-get install -y --no-install-recommends \
         ca-certificates curl gnupg python3 python3-venv ffmpeg supervisor \
-        xvfb openbox x11-utils fonts-noto-cjk fonts-liberation procps \
+        xvfb openbox x11-utils x11-xserver-utils fonts-noto-cjk fonts-liberation procps \
         libgbm1 libnss3 libatk-bridge2.0-0 libgtk-3-0 libasound2 libxss1 libxtst6 && \
     curl -fsSL "https://github.com/kasmtech/KasmVNC/releases/download/v${KASMVNC_VERSION}/${KASMVNC_DEB}" -o /tmp/kasmvnc.deb && \
     apt-get install -y --no-install-recommends /tmp/kasmvnc.deb && \
