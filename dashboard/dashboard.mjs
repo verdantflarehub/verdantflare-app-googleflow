@@ -66,12 +66,27 @@ function accountsView(data) {
 }
 
 function policyView(data) {
-  return '<form id="policy-form"><section class="card"><p class="gf-note">配置当前账号的并发节奏与风控策略（本渠道不设今日提交或今日积分限额）。</p><div class="g-form-grid">' +
-    Object.entries(fields).map(([key, label]) => '<label>' + label + (choices[key]
-      ? '<select name="' + key + '">' + Object.entries(choices[key]).map(([v, l]) => '<option value="' + v + '" ' + (data[key] === v ? 'selected' : '') + '>' + l + '</option>').join('') + '</select>'
-      : '<input required type="number" step="1" min="' + (key === 'concurrency' ? 1 : 0) + '" name="' + key + '" value="' + escape(data[key]) + '">'
-    ) + '</label>').join('') +
-    '</div><div class="g-account-footer"><small>点击顶部面包屑「Google Flow」返回账号列表。</small><div class="actions">' +
+  const num = (key, label, unit, help, min) =>
+    '<label class="gf-field"><span class="gf-field-label">' + label + '<span class="gf-field-unit">' + unit + '</span></span>' +
+    '<input required type="number" step="1" min="' + min + '" name="' + key + '" value="' + escape(data[key]) + '">' +
+    '<small>' + help + '</small></label>';
+  const sel = (key, label, help) =>
+    '<label class="gf-field"><span class="gf-field-label">' + label + '</span><select name="' + key + '">' +
+    Object.entries(choices[key]).map(([v, l]) => '<option value="' + v + '" ' + (data[key] === v ? 'selected' : '') + '>' + l + '</option>').join('') +
+    '</select><small>' + help + '</small></label>';
+  return '<form id="policy-form"><section class="card gf-policy-card">' +
+    '<div class="gf-form-section"><div class="gf-form-section-head"><h3>并发与提交节奏</h3><p>控制单个 Google Flow 账号的并发任务数与请求频率（本渠道不设今日提交或今日积分限额）。</p></div>' +
+    '<div class="gf-form-grid">' +
+    num('concurrency', '同时执行的生成数', '个任务', '建议单账号保持 1，避免同一浏览器会话互相抢锁', 1) +
+    num('min_interval_seconds', '两次提交最小间隔', '秒', '相邻两次提交之间的最短等待时间，0 表示不额外限速', 0) +
+    '</div></div>' +
+    '<div class="gf-form-section"><div class="gf-form-section-head"><h3>风控与异常处理</h3><p>触发上游异常或网络中断时的自动保护动作，防止账号被持续风控或重复扣分。</p></div>' +
+    '<div class="gf-form-grid">' +
+    sel('on_unusual_activity', '遇到 403 UNUSUAL_ACTIVITY', 'Google Flow 返回异常活动拦截时的响应方式') +
+    num('cooldown_minutes', '自动冷却时长', '分钟', '填 0 表示暂停后需手动恢复；大于 0 时到期自动恢复', 0) +
+    sel('on_submission_unknown', '提交结果不明时', '网络超时且无法确认上游是否已扣分时的处理策略') +
+    '</div></div>' +
+    '<div class="gf-policy-foot"><small>修改仅对当前账号生效，点击顶部面包屑「Google Flow」返回账号列表。</small><div class="actions">' +
     button('defaults', '恢复默认') + '<button type="submit" data-vf="Button" class="gf-primary">保存策略</button></div></div></section></form>';
 }
 
@@ -98,7 +113,7 @@ function modelsView() {
     '</div></td><td><strong>' + credits + '</strong></td></tr>';
   return '<section class="card"><h2>视频模型</h2><p class="gf-note">预留积分为网关保守上限，Google AI Ultra 实际扣分通常低于或等于预留值；未列出的参考类型表示不支持。</p><table><thead><tr><th>模型</th><th>支持规格</th><th>预留积分</th></tr></thead><tbody>' +
     row('Omni 1.2 Flash', 'omni-1.2-flash', [['时长','3–15 秒'],['比例','16:9 / 9:16'],['分辨率','720p（可选 360p）'],['超分导出','1080p'],['帧率','24 fps'],['参考图片','最多 7 张'],['参考视频','1 段']], '10') +
-    row('Veo 3.1 Lite', 'veo-lite', [['时长','4 / 6 / 8 秒'],['比例','16:9 / 9:16'],['分辨率','720p'],['超分导出','1080p'],['帧率','24 fps'],['参考图片','最多 3 张']], '10') +
+    row('Veo 3.1 Lite', 'veo-lite', [['时长','4 / 6 / 8 秒'],['比例','16:9 / 9:16'],['分辨率','720p'],['帧率','24 fps'],['参考图片','最多 3 张']], '10') +
     row('Veo 3.1 Fast', 'veo-fast', [['时长','4 / 6 / 8 秒'],['比例','16:9 / 9:16'],['分辨率','720p'],['超分导出','1080p'],['帧率','24 fps'],['参考图片','最多 3 张']], '20') +
     row('Veo 3.1 Quality', 'veo-quality', [['时长','4 / 6 / 8 秒'],['比例','16:9 / 9:16'],['分辨率','720p'],['超分导出','1080p'],['帧率','24 fps']], '100') +
     '</tbody></table></section>' +
