@@ -5,7 +5,9 @@ umask 077
 export XDG_RUNTIME_DIR="${XDG_RUNTIME_DIR:-/run/user/1000}"
 export DISPLAY="${DISPLAY:-:99}"
 mkdir -p "$XDG_RUNTIME_DIR" "$GFLOW_CLI_HOME" "$GFLOW_CLI_OUTPUT_DIR" "$GOOGLE_FLOW_STATE_DIR"
-chmod 700 "$XDG_RUNTIME_DIR" "$GFLOW_CLI_HOME" "$GFLOW_CLI_OUTPUT_DIR" "$GOOGLE_FLOW_STATE_DIR"
+for dir in "$XDG_RUNTIME_DIR" "$GFLOW_CLI_HOME" "$GFLOW_CLI_OUTPUT_DIR" "$GOOGLE_FLOW_STATE_DIR"; do
+    chmod 700 "$dir" 2>/dev/null || true
+done
 
 conf=/app/runtime/supervisord.conf
 stopping=false
