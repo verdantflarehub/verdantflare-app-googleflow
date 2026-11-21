@@ -51,7 +51,8 @@ def management(g, token, station, assets=None, lease=None, desktop=None):
                     "SELECT 1 FROM audit WHERE action='lease_reconcile_timeout' AND time>=? LIMIT 1",
                     (status["since"],)).fetchone())
                 return reply(status | {"account": account, "today": q.usage(), "policy": q.setting("policy"),
-                                      "lease_valid": bool(lease and lease.valid), "lease_reconcile_timeout": timed_out})
+                                      "lease_valid": True if lease is None else bool(lease.valid),
+                                      "lease_reconcile_timeout": timed_out})
         if path == "/policy":
             if request.method == "PUT":
                 q.configure(await object_body(request), actor)
@@ -60,7 +61,7 @@ def management(g, token, station, assets=None, lease=None, desktop=None):
             q.configure(DEFAULTS, actor)
             return reply(q.setting("policy"))
         if path.startswith("/channel/"):
-            q.action(request.path_params["action"], actor, bool(lease and lease.valid))
+            q.action(request.path_params["action"], actor, True if lease is None else bool(lease.valid))
             return reply({"ok": True})
         if path == "/calls":
             return reply([view(row) for row in q.db.execute("SELECT * FROM calls ORDER BY rowid DESC LIMIT 200")])
@@ -97,7 +98,7 @@ def management(g, token, station, assets=None, lease=None, desktop=None):
             if action == "status":
                 return reply({"open": False, "available": False})
             raise Error("desktop_unavailable", 503)
-        if action in ("open", "turn", "login") and not (lease and lease.valid):
+        if action in ("open", "turn", "login") and lease is not None and not lease.valid:
             raise Error("gpu_lease_lost", 409)
         result = await desktop(action)
         if request.method != "GET":

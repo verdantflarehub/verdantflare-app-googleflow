@@ -54,13 +54,16 @@ async def run():
     assets = DashboardAssets(env["GOOGLE_FLOW_DASHBOARD_DIR"])
     org, station = env["GOOGLE_FLOW_ORGANIZATION_ID"], env["GOOGLE_FLOW_STATION_ID"]
     hook = env["GOOGLE_FLOW_DESKTOP_CONTROL"]
-    gpu = await command("nvidia-smi", "--query-gpu=uuid", "--format=csv,noheader")
-    if not gpu or len(gpu.splitlines()) != 1:
-        raise ValueError("gpu_identity_unavailable")
-    identity = dict(pod_uid=env["GOOGLE_FLOW_POD_UID"], container_id=env["GOOGLE_FLOW_CONTAINER_ID"],
-                    boot_id=Path("/proc/sys/kernel/random/boot_id").read_text().strip())
-    scheduler = Scheduler(env["GOOGLE_FLOW_SCHEDULER_URL"], env["GOOGLE_FLOW_SCHEDULER_TOKEN"], gpu,
-                          int(env["GOOGLE_FLOW_PEAK_BUDGET_MIB"]))
+    no_gpu = env.get("GOOGLE_FLOW_NO_GPU", "").lower() == "true" or not env.get("GOOGLE_FLOW_SCHEDULER_URL")
+    gpu = identity = scheduler = None
+    if not no_gpu:
+        gpu = await command("nvidia-smi", "--query-gpu=uuid", "--format=csv,noheader")
+        if not gpu or len(gpu.splitlines()) != 1:
+            raise ValueError("gpu_identity_unavailable")
+        identity = dict(pod_uid=env["GOOGLE_FLOW_POD_UID"], container_id=env["GOOGLE_FLOW_CONTAINER_ID"],
+                        boot_id=Path("/proc/sys/kernel/random/boot_id").read_text().strip())
+        scheduler = Scheduler(env["GOOGLE_FLOW_SCHEDULER_URL"], env["GOOGLE_FLOW_SCHEDULER_TOKEN"], gpu,
+                              int(env["GOOGLE_FLOW_PEAK_BUDGET_MIB"]))
     token = secrets.token_urlsafe(48)
     client = GFlow(local_session(token), json.loads(env.get("GOOGLE_FLOW_MODEL_CREDITS", "{}")))
     daemon = None
@@ -75,6 +78,8 @@ async def run():
 
     async def desktop(action):
         if action == "turn":
+            if no_gpu:
+                raise Error("desktop_turn_disabled", 404)
             rtc_path = env.get("GOOGLE_FLOW_RTC_FILE")
             if rtc_path and Path(rtc_path).is_file():
                 try:
@@ -88,7 +93,7 @@ async def run():
             raise Error("invalid_field", field="action")
         return json.loads(await command(hook, action))
 
-    # Bind both sockets before touching the durable queue or acquiring a lease.
+    # Bind both sockets before touching the durable queue or starting the display daemon.
     sockets, servers, tasks = [], [], []
     stop = asyncio.Event()
     q = lease = publisher = None
@@ -99,10 +104,11 @@ async def run():
             sock.bind(("0.0.0.0", port))
             sock.setblocking(False)
         q = Queue(state / "queue.sqlite3")
-        lease = Lease(q, scheduler, identity, gpu, settle,
-                      int(env.get("GOOGLE_FLOW_LEASE_RECONCILE_TIMEOUT_MINUTES", "30")))
+        if not no_gpu:
+            lease = Lease(q, scheduler, identity, gpu, settle,
+                          int(env.get("GOOGLE_FLOW_LEASE_RECONCILE_TIMEOUT_MINUTES", "30")))
         g = Gateway(q, client, Media(state / "cache"), output, org)
-        g.admitted = lambda: lease.valid and daemon is not None and daemon.returncode is None
+        g.admitted = lambda: (True if no_gpu else lease.valid) and daemon is not None and daemon.returncode is None
         apps = [execution(g, execution_token), management(g, management_token, station, assets, lease, desktop)]
         for app, sock in zip(apps, sockets):
             server = Listener(uvicorn.Config(app, access_log=False, log_level="warning"))
@@ -115,21 +121,27 @@ async def run():
                 dict(capability_id=k, adapter_version="1", execution_state="adapter_connected_unverified")
                 for k in ("image", "video")])
 
-        async def lifecycle():
+        async def start_daemon():
             nonlocal daemon
+            await command(hook, "start")
+            allowed = {"PATH", "HOME", "DO_NOT_TRACK", "LANG", "LC_ALL", "DISPLAY", "WAYLAND_DISPLAY",
+                       "DBUS_SESSION_BUS_ADDRESS", "HTTPS_PROXY", "HTTP_PROXY", "NO_PROXY"}
+            process_env = {key: value for key, value in env.items()
+                           if key.upper() in allowed or key.startswith(("XDG_", "GFLOW_CLI_"))}
+            process_env.update(GFLOW_CLI_DAEMON_TOKEN=token, GFLOW_CLI_TELEMETRY="0",
+                               GFLOW_CLI_UPDATE_CHECK="false", GFLOW_CLI_INCIDENT_CAPTURE="false")
+            daemon = await asyncio.create_subprocess_exec("gflow", "serve", "--host", "127.0.0.1",
+                 "--port", "18000", env=process_env, stdout=asyncio.subprocess.DEVNULL,
+                 stderr=asyncio.subprocess.DEVNULL)
+
+        async def lifecycle():
             while not stop.is_set():
-                if not lease.valid:
+                if no_gpu:
+                    if daemon is None or daemon.returncode is not None:
+                        await start_daemon()
+                elif not lease.valid:
                     if await lease.recover():
-                        await command(hook, "start")
-                        allowed = {"PATH", "HOME", "DO_NOT_TRACK", "LANG", "LC_ALL", "DISPLAY", "WAYLAND_DISPLAY",
-                                   "DBUS_SESSION_BUS_ADDRESS", "HTTPS_PROXY", "HTTP_PROXY", "NO_PROXY"}
-                        process_env = {key: value for key, value in env.items()
-                                       if key.upper() in allowed or key.startswith(("XDG_", "GFLOW_CLI_"))}
-                        process_env.update(GFLOW_CLI_DAEMON_TOKEN=token, GFLOW_CLI_TELEMETRY="0",
-                                           GFLOW_CLI_UPDATE_CHECK="false", GFLOW_CLI_INCIDENT_CAPTURE="false")
-                        daemon = await asyncio.create_subprocess_exec("gflow", "serve", "--host", "127.0.0.1",
-                             "--port", "18000", env=process_env, stdout=asyncio.subprocess.DEVNULL,
-                             stderr=asyncio.subprocess.DEVNULL)
+                        await start_daemon()
                 else:
                     await lease.heartbeat()
                 await asyncio.sleep(30)
@@ -140,7 +152,7 @@ async def run():
             if retention <= 0:
                 raise ValueError("invalid_cache_retention")
             while True:
-                if lease.valid:
+                if no_gpu or lease.valid:
                     await g.tick()
                 if time.monotonic() >= next_cleanup:
                     cutoff = time.time() - retention * 3600
@@ -154,7 +166,7 @@ async def run():
 
         async def publish():
             while True:
-                active = lease.valid and not q.setting("pause")
+                active = (True if no_gpu else lease.valid) and not q.setting("pause")
                 try:
                     await asyncio.to_thread(publisher.set_state, "enabled" if active else "disabled",
                                             "ready" if active else "paused")
@@ -183,6 +195,8 @@ async def run():
         try:
             if lease and lease.valid:
                 await lease.close()
+            elif no_gpu:
+                await settle()
         finally:
             if publisher:
                 await asyncio.to_thread(publisher.close)
@@ -190,7 +204,8 @@ async def run():
                 sock.close()
             if q:
                 q.db.close()
-            await scheduler.http.aclose()
+            if scheduler:
+                await scheduler.http.aclose()
 
 
 def main():

@@ -1,27 +1,12 @@
 #!/bin/bash
 set -euo pipefail
-. /etc/beagle-wind-vnc/runtime-env.sh
 umask 077
 
-gpu=$(nvidia-smi --query-gpu=uuid --format=csv,noheader) || exit 78
-if [[ ! $gpu =~ ^GPU-[[:xdigit:]]{8}-[[:xdigit:]]{4}-[[:xdigit:]]{4}-[[:xdigit:]]{4}-[[:xdigit:]]{12}$ ]]; then
-    echo 'Expected exactly one GPU UUID' >&2
-    exit 78
-fi
-nodes=()
-for node in /dev/dri/renderD*; do
-    if [[ -c $node && ! -L $node ]]; then nodes+=("$node"); fi
-done
-if [[ ${#nodes[@]} != 1 ]]; then
-    echo 'Expected exactly one injected render device' >&2
-    exit 78
-fi
-export BDWIND_SMITHAY_RENDER_NODE="${nodes[0]}"
-/etc/beagle-wind-vnc/entrypoint.sh true
+export XDG_RUNTIME_DIR="${XDG_RUNTIME_DIR:-/run/user/1000}"
+export DISPLAY="${DISPLAY:-:99}"
 mkdir -p "$XDG_RUNTIME_DIR" "$GFLOW_CLI_HOME" "$GFLOW_CLI_OUTPUT_DIR" "$GOOGLE_FLOW_STATE_DIR"
 chmod 700 "$XDG_RUNTIME_DIR" "$GFLOW_CLI_HOME" "$GFLOW_CLI_OUTPUT_DIR" "$GOOGLE_FLOW_STATE_DIR"
 
-# Keep the control socket available while the gateway settles and releases its lease.
 conf=/app/runtime/supervisord.conf
 stopping=false
 signaled=false
