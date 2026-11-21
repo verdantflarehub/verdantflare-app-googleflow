@@ -1462,4 +1462,5 @@ button.quiet:not(.g-icon-button)::after,
 .gf-field input:focus, .gf-field select:focus { outline: none; border-color: var(--accent); box-shadow: 0 0 0 3px var(--accent-soft); }
 .gf-policy-foot { display: flex; align-items: center; justify-content: space-between; gap: 12px; flex-wrap: wrap; margin-top: 24px; padding-top: 18px; border-top: 1px solid var(--line); }
 .gf-policy-foot small { font-size: 12.5px; color: var(--muted); }
+.card + .card { margin-top: 20px; }
 @media (max-width: 760px) { .gf-form-grid { grid-template-columns: 1fr; } }
