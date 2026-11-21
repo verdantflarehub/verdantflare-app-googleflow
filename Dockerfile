@@ -42,7 +42,7 @@ COPY dashboard/ dashboard-source/
 RUN python3 -m venv /opt/google-flow && \
     /opt/google-flow/bin/python -m pip install --no-cache-dir . && \
     /opt/google-flow/bin/python -m pip check && \
-    /opt/google-flow/bin/python -c "from importlib.metadata import version; assert version('gflow-cli') == '0.101.0'" && \
+    /opt/google-flow/bin/python -c "from importlib.metadata import version; assert version('gflow-cli') == '0.103.1'" && \
     /opt/google-flow/bin/python -m google_flow_gateway.dashboard --source dashboard-source --output dashboard && \
     rm -rf dashboard-source && \
     chown -R 1000:1000 /app /opt/google-flow
