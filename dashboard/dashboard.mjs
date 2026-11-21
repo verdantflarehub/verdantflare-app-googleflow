@@ -12,7 +12,8 @@ let revision = 0, busy = false;
 function page() { const slug = location.hash.split('/').pop(); return Object.hasOwn(pages,slug) ? slug : 'overview'; }
 function overview(data) {
   const paused = data.status === 'paused';
-  const facts = {'会员等级':data.account.tier,'剩余积分':data.account.credits,'今日提交':data.today.submits,'今日积分':data.today.credits};
+  const facts = {'会员账号':data.account.email,'剩余积分':data.account.credits,'今日提交':data.today.submits,'今日积分':data.today.credits};
+  if (data.account.tier) facts['会员等级'] = data.account.tier;
   return (paused ? '<div class="vf-banner danger" role="alert">'+escape(reasons[data.reason])+' · '+escape(new Date(data.since*1000).toLocaleString())+
     (data.call_id?' · '+escape(data.call_id):'')+(data.until?' · 冷却至 '+escape(new Date(data.until*1000).toLocaleString()):' · 需手动恢复或重新准入')+
     (data.lease_reconcile_timeout?' · 旧 GPU 租约对账超时':'')+' '+button('resume',labels.resume)+button('clear-cooldown',labels['clear-cooldown'])+'</div>' : '')+

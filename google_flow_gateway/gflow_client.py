@@ -46,7 +46,7 @@ class GFlow:
             if status in ("throttled", "error", "unavailable", "profile_locked"):
                 raise Error("channel_unavailable", 503)
             if status in UNAUTHENTICATED_STATUSES:
-                value = {"authorized": False, "credits": None}
+                value = {"authorized": False, "credits": None, "email": auth.get("user_email"), "tier": None}
                 self._account_cache = value
                 self._account_cached_at = time.monotonic()
                 return dict(value)
@@ -56,7 +56,12 @@ class GFlow:
             balance = result.get("credits")
             if type(balance) is not int or balance < 0:
                 raise Error("balance_unavailable", 503)
-            value = {"authorized": True, "credits": balance, "tier": result.get("service_tier")}
+            value = {
+                "authorized": True,
+                "credits": balance,
+                "email": result.get("email") or auth.get("user_email"),
+                "tier": result.get("service_tier") or result.get("user_paygate_tier") or result.get("sku"),
+            }
             self._account_cache = value
             self._account_cached_at = time.monotonic()
             return dict(value)
