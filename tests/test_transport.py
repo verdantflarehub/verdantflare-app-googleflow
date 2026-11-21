@@ -41,7 +41,11 @@ class TransportTests(unittest.IsolatedAsyncioTestCase):
                     while not server.started:
                         await asyncio.sleep(.02)
                     account = await GFlow(local_session(token, port)).account()
-                self.assertEqual(account, {"authorized":True, "credits":14, "tier":"fixture"})
+                self.assertEqual(account["authorized"], True)
+                self.assertEqual(account["credits"], 14)
+                self.assertEqual(account["tier"], "fixture")
+                self.assertEqual(account["email"], "private")
+                self.assertIsInstance(account["updated_at"], float)
                 self.assertTrue(seen)
                 self.assertTrue(all(seen))
             finally:

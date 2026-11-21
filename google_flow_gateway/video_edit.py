@@ -7,6 +7,7 @@ from pathlib import Path
 
 from gflow_cli.api.client import FlowApiClient
 from gflow_cli.api.transports._mc_common import (
+    ABORTED_BEFORE_SEND,
     ASPECT_LIGATURE,
     MIGRATED_ROOT_URL,
     NEW_PROJECT_BUTTON,
@@ -19,9 +20,73 @@ from gflow_cli.api.transports._mc_common import (
 from gflow_cli.api.transports.migrated_composer import MigratedComposer
 from gflow_cli.api.video import Mode, VideoModel
 from gflow_cli.config import get_settings
+from gflow_cli.errors import GFlowError, WireFormatError
 from gflow_cli.profile_store import resolve_profile
 
 VIDEO_EDIT_SUBMIT_RPCS = ("jIps6", *SUBMIT_RPCS)
+
+
+def _video_edit_request_check(vid_id: str, img_ids: tuple[str, ...]):
+    expected = (vid_id, *img_ids)
+
+    def check(rpcid: str, body: str) -> GFlowError | None:
+        if rpcid not in VIDEO_EDIT_SUBMIT_RPCS:
+            return None
+        if not body:
+            return WireFormatError(
+                detail=f"migrated host: the {rpcid} submit body could not be read",
+                route=f"batchexecute:{rpcid}",
+            )
+        if "macaron_cookie_edit" not in body and "_r2v_" not in body:
+            return WireFormatError(
+                detail=f"migrated host: the {rpcid} submit body is missing the video edit model key",
+                route=f"batchexecute:{rpcid}",
+            )
+        missing = [m for m in expected if m not in body]
+        if missing:
+            return WireFormatError(
+                detail=(
+                    f"migrated host: the {rpcid} submit body is missing {len(missing)} of "
+                    f"{len(expected)} edit asset(s) ({', '.join(missing[:4])})"
+                ),
+                route=f"batchexecute:{rpcid}",
+            )
+        return None
+
+    return check
+
+
+def classify_video_edit_exception(exc: BaseException, *, entered_submit: bool) -> dict:
+    detail = str(exc)
+    charged = getattr(exc, "charged", None)
+    hint = getattr(exc, "remediation_hint", None) or ""
+    pre_send = (
+        not entered_submit
+        or charged == "no"
+        or ABORTED_BEFORE_SEND in hint
+        or "stayed disabled" in detail
+        or "is missing after the prompt was typed" in detail
+        or "submit button could not be found" in detail
+    )
+    if pre_send:
+        return {
+            "status": "failed",
+            "error": {
+                "code": "rejected",
+                "detail": detail,
+                "charged": "no",
+                "accepted": False,
+            },
+        }
+    return {
+        "status": "failed",
+        "error": {
+            "code": "submission_unknown",
+            "detail": detail,
+            "charged": "maybe",
+            "accepted": None,
+        },
+    }
 
 
 async def _ensure_project_id(page) -> str:
@@ -123,49 +188,62 @@ async def generate_video_edit(
     req.aspect = selected_aspect
     req.duration = duration
 
-    async with FlowApiClient(profile_dir=profile_dir, headless=True) as client:
-        page = client._page
-        proj_id = await _ensure_project_id(page)
-        composer = MigratedComposer()
-        await composer.ensure_editor(page, proj_id)
-        await composer.apply_video_settings(page, req)
+    entered_submit = False
+    try:
+        async with FlowApiClient(profile_dir=profile_dir, headless=True) as client:
+            page = client._page
+            proj_id = await _ensure_project_id(page)
+            composer = MigratedComposer()
+            await composer.ensure_editor(page, proj_id)
+            await composer.apply_video_settings(page, req)
 
-        vid_id, vid_stem = await _upload_video(page, video_path)
-        img_ids: list[str] = []
-        img_names: list[str] = []
-        for img_path in reference_images:
-            iid, iname = await composer._upload_via_toolbar(page, proj_id, img_path)
-            img_ids.append(iid)
-            img_names.append(iname)
+            vid_id, vid_stem = await _upload_video(page, video_path)
+            img_ids: list[str] = []
+            img_names: list[str] = []
+            for img_path in reference_images:
+                iid, iname = await composer._upload_via_toolbar(page, proj_id, img_path)
+                img_ids.append(iid)
+                img_names.append(iname)
 
-        await _attach_video_chip(page, composer, vid_stem)
-        for idx, iname in enumerate(img_names, start=1):
-            await composer._mention_by_name(page, iname, expect_chips=idx)
-        await composer.send_prompt(page, prompt, append=True)
+            await _attach_video_chip(page, composer, vid_stem)
+            for idx, iname in enumerate(img_names, start=1):
+                await composer._mention_by_name(page, iname, expect_chips=idx)
+            await composer.send_prompt(page, prompt, append=True)
 
-        record = await composer.submit_and_observe(
-            page,
-            poll_timeout_s=480.0,
-            on_started=None,
-            project_id=proj_id,
-            submit_rpcs=VIDEO_EDIT_SUBMIT_RPCS,
-            expect_reference_ids=tuple(img_ids),
-            adopt_ids=(vid_id, *img_ids),
-        )
-        if not record.is_done:
-            return {"status": "failed", "flow_media_id": record.media_id,
-                    "error": {"code": "generation_failed", "detail": str(record.status)}}
+            entered_submit = True
+            record = await composer.submit_and_observe(
+                page,
+                poll_timeout_s=480.0,
+                on_started=None,
+                project_id=proj_id,
+                submit_rpcs=VIDEO_EDIT_SUBMIT_RPCS,
+                adopt_ids=(vid_id, *img_ids),
+                request_check=_video_edit_request_check(vid_id, tuple(img_ids)),
+            )
+            if not record.is_done:
+                return {
+                    "status": "failed",
+                    "error": {
+                        "code": "generation_failed",
+                        "detail": str(record.status),
+                        "charged": "no",
+                        "accepted": False,
+                    },
+                }
 
-        output_dir.mkdir(parents=True, exist_ok=True)
+            output_dir.mkdir(parents=True, exist_ok=True)
 
-        async def _save(media_id: str, data: bytes) -> Path:
-            dest = output_dir / f"{media_id}.mp4"
-            await asyncio.to_thread(dest.write_bytes, data)
-            return dest
+            async def _save(media_id: str, data: bytes) -> Path:
+                dest = output_dir / f"{media_id}.mp4"
+                await asyncio.to_thread(dest.write_bytes, data)
+                return dest
 
-        saved = await composer.download(page, record, _save)
-        return {
-            "status": "ok",
-            "flow_media_id": record.media_id,
-            "files": [str(saved)] if saved else [],
-        }
+            saved = await composer.download(page, record, _save)
+            return {
+                "status": "ok",
+                "project_id": proj_id,
+                "flow_media_id": record.media_id,
+                "files": [str(saved)] if saved else [],
+            }
+    except Exception as exc:
+        return classify_video_edit_exception(exc, entered_submit=entered_submit)

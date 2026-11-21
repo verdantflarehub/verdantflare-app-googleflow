@@ -70,7 +70,7 @@ class GFlow:
 
     async def generate_video_edit(self, *, prompt, video_path, reference_images, aspect, duration, output_dir):
         from pathlib import Path
-        from .video_edit import generate_video_edit as _run_edit
+        from .video_edit import classify_video_edit_exception, generate_video_edit as _run_edit
         async with self._account_lock:
             try:
                 return await _run_edit(
@@ -82,7 +82,7 @@ class GFlow:
                     output_dir=Path(output_dir),
                 )
             except Exception as exc:
-                return {"status": "failed", "error": {"code": "video_edit_failed", "detail": str(exc)}}
+                return classify_video_edit_exception(exc, entered_submit=False)
 
     def trigger_account_refresh(self):
         if self._account_refresh_task is None or self._account_refresh_task.done():

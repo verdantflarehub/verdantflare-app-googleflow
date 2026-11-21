@@ -93,6 +93,24 @@ class FakeFlow:
             return {"status": "completed", "flow_media_id": "video-asset",
                     "files": [str(root / "fixture.mp4")], "credits_used": self.price}
 
+        @self.mcp.tool()
+        def gflow_upscale_image(media_id: str, scale: str = "2k") -> dict:
+            if self.mode == "upscale_error":
+                raise RuntimeError("upscale_failed")
+            if self.mode == "upscale_missing":
+                return {"path": str(root / "nonexistent-upscaled.png")}
+            up_path = root / f"result_{scale}.png"
+            Image.new("RGB", (8, 8)).save(up_path)
+            return {"path": str(up_path), "media_id": media_id, "scale": scale}
+
+        @self.mcp.tool()
+        def gflow_upscale_video(media_id: str, scale: str = "1080p", project: str | None = None) -> dict:
+            if self.mode == "upscale_error":
+                raise RuntimeError("upscale_failed")
+            if self.mode == "upscale_missing":
+                return {"path": str(root / "nonexistent-upscaled.mp4")}
+            return {"path": str(root / "fixture.mp4"), "media_id": media_id, "scale": scale}
+
 
 class GatewayTests(unittest.IsolatedAsyncioTestCase):
     async def asyncSetUp(self):
@@ -428,3 +446,91 @@ class GatewayTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(response.status_code, 422)
         self.assertEqual(response.json(), {"code": "invalid_field", "field": "reference_images"})
         self.assertEqual(self.fake.count, 0)
+
+    async def test_upscale_succeeded_and_fallback_original(self):
+        for mode, expected_status in (
+            ("success", "upscaled"),
+            ("upscale_error", "fallback_original"),
+            ("upscale_missing", "fallback_original"),
+        ):
+            with self.subTest(mode=mode):
+                self.fake.mode = mode
+                key = f"up-{mode}"
+                data = self.payload(key, "/v1/calls")
+                data["parameters"]["upscale"] = "2k"
+                res = await self.x.post("/v1/calls", json=data)
+                self.assertEqual(res.status_code, 200, res.text)
+                body = res.json()
+                self.assertEqual(body["state"], "succeeded")
+                self.assertEqual(body["upscale_status"], expected_status)
+                self.assertEqual(body["upscale_target"], "2k")
+
+    async def test_video_edit_request_check_and_pre_send_refusal_vs_unknown(self):
+        from google_flow_gateway.video_edit import _video_edit_request_check, classify_video_edit_exception
+        from gflow_cli.api.transports._mc_common import ABORTED_BEFORE_SEND
+        from gflow_cli.errors import GFlowError, WireFormatError
+
+        vid_id = "vid-11111111"
+        img_id = "img-22222222"
+        check = _video_edit_request_check(vid_id, (img_id,))
+
+        self.assertIsNone(check("other_rpc", ""))
+        self.assertIsInstance(check("jIps6", ""), WireFormatError)
+        self.assertIsInstance(check("jIps6", f"{vid_id} {img_id}"), WireFormatError)
+        self.assertIsInstance(check("jIps6", f"macaron_cookie_edit {vid_id}"), WireFormatError)
+        self.assertIsInstance(check("jIps6", f"macaron_cookie_edit {img_id}"), WireFormatError)
+        self.assertIsNone(check("jIps6", f"macaron_cookie_edit {vid_id} {img_id}"))
+
+        refused_exc = WireFormatError(detail="submit_refused_before_send", route="batchexecute:jIps6")
+        refused_exc.charged = "no"
+        refused_exc.remediation_hint = ABORTED_BEFORE_SEND
+        refused_res = classify_video_edit_exception(refused_exc, entered_submit=True)
+        self.assertEqual(refused_res["error"]["charged"], "no")
+        self.assertIs(refused_res["error"]["accepted"], False)
+
+        pre_click_res = classify_video_edit_exception(RuntimeError("video_reference_attach_timeout"), entered_submit=False)
+        self.assertEqual(pre_click_res["error"]["charged"], "no")
+        self.assertIs(pre_click_res["error"]["accepted"], False)
+
+        post_click_exc = GFlowError(detail="timed out waiting for workflow media id", charged="maybe")
+        unknown_res = classify_video_edit_exception(post_click_exc, entered_submit=True)
+        self.assertEqual(unknown_res["error"]["charged"], "maybe")
+        self.assertIsNone(unknown_res["error"]["accepted"])
+
+        # Dispatch integration: pre-send refusal -> failed/rejected (reserve=0), post-click timeout -> submission_unknown (reserve=10)
+        target = self.root / "fixture.mp4"
+        subprocess.run(["ffmpeg", "-loglevel", "error", "-f", "lavfi", "-i", "color=s=16x16:r=1",
+                        "-frames:v", "2", "-c:v", "mpeg4", "-movflags", "+faststart", str(target)], check=True)
+        vraw = target.read_bytes()
+        vdigest = hashlib.sha256(vraw).hexdigest()
+        iraw = self.fake.path.read_bytes()
+        idigest = hashlib.sha256(iraw).hexdigest()
+        self.assertEqual((await self.x.put("/v1/inputs", content=vraw, headers={"content-type": "video/mp4", "x-content-sha256": vdigest})).status_code, 200)
+        self.assertEqual((await self.x.put("/v1/inputs", content=iraw, headers={"content-type": "image/png", "x-content-sha256": idigest})).status_code, 200)
+        self.g.client.prices["omni-1.2-flash"] = 10
+
+        orig_catalog = self.g.client.catalog
+        async def _fake_catalog():
+            cat = await orig_catalog()
+            cat["models"]["video"] = sorted(set(cat["models"]["video"]) | {"omni-1.2-flash"})
+            return cat
+        self.g.client.catalog = _fake_catalog
+
+        async def _mock_pre_send(**kwargs):
+            return refused_res
+        self.g.client.generate_video_edit = _mock_pre_send
+        job1 = {
+            "request_id": "edit-refused",
+            "model": "omni-1.2-flash",
+            "capability": "video",
+            "parameters": {"prompt": "swap", "aspect": "16:9", "duration": 3, "reference_images": [idigest], "reference_videos": [vdigest]},
+        }
+        r1 = (await self.x.post("/v1/jobs", json=job1)).json()
+        self.assertEqual((r1["state"], r1["accepted"], r1["reason_code"], r1["reserved"]), ("failed", False, "rejected", 0))
+
+        async def _mock_unknown(**kwargs):
+            return unknown_res
+        self.g.client.generate_video_edit = _mock_unknown
+        job2 = dict(job1, request_id="edit-unknown")
+        r2 = (await self.x.post("/v1/jobs", json=job2)).json()
+        self.assertEqual((r2["state"], r2["accepted"], r2["reason_code"], r2["reserved"]), ("submission_unknown", None, "acceptance_unknown", 10))
