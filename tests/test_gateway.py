@@ -466,7 +466,11 @@ class GatewayTests(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual(body["upscale_target"], "2k")
 
     async def test_video_edit_request_check_and_pre_send_refusal_vs_unknown(self):
-        from google_flow_gateway.video_edit import _video_edit_request_check, classify_video_edit_exception
+        from google_flow_gateway.video_edit import (
+            _strip_audio_for_flow_upload,
+            _video_edit_request_check,
+            classify_video_edit_exception,
+        )
         from gflow_cli.api.transports._mc_common import ABORTED_BEFORE_SEND
         from gflow_cli.errors import GFlowError, WireFormatError
 
@@ -498,9 +502,19 @@ class GatewayTests(unittest.IsolatedAsyncioTestCase):
         self.assertIsNone(unknown_res["error"]["accepted"])
 
         # Dispatch integration: pre-send refusal -> failed/rejected (reserve=0), post-click timeout -> submission_unknown (reserve=10)
-        target = self.root / "fixture.mp4"
+        target = self.root / "fixture_with_audio.mp4"
         subprocess.run(["ffmpeg", "-loglevel", "error", "-f", "lavfi", "-i", "color=s=16x16:r=1",
-                        "-frames:v", "2", "-c:v", "mpeg4", "-movflags", "+faststart", str(target)], check=True)
+                        "-f", "lavfi", "-i", "sine=frequency=440:duration=2",
+                        "-frames:v", "2", "-c:v", "mpeg4", "-c:a", "aac", "-shortest",
+                        "-movflags", "+faststart", str(target)], check=True)
+        stripped = _strip_audio_for_flow_upload(target)
+        stripped_path = self.root / "stripped.mp4"
+        stripped_path.write_bytes(stripped)
+        streams = subprocess.run(
+            ["ffprobe", "-v", "error", "-show_entries", "stream=codec_type", "-of", "csv=p=0", str(stripped_path)],
+            capture_output=True, text=True, check=True,
+        ).stdout.strip().splitlines()
+        self.assertEqual(streams, ["video"])
         vraw = target.read_bytes()
         vdigest = hashlib.sha256(vraw).hexdigest()
         iraw = self.fake.path.read_bytes()

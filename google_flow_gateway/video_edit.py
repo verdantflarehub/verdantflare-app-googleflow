@@ -3,6 +3,8 @@ from __future__ import annotations
 
 import asyncio
 import json
+import subprocess
+import tempfile
 from pathlib import Path
 
 from gflow_cli.api.client import FlowApiClient
@@ -101,6 +103,25 @@ async def _ensure_project_id(page) -> str:
     return page.url.split("/project/")[1].split("?")[0].split("/")[0]
 
 
+def _strip_audio_for_flow_upload(video_path: Path) -> bytes:
+    """Strip any audio stream before uploading a source video for macaron_cookie_edit.
+
+    Google Flow's video edit rejects source clips carrying a speech/audio track with
+    status=4 PUBLIC_ERROR_SPEECH_EDIT / SPEECH_EDIT_BLOCKED. Copying the video stream
+    with ``-an`` preserves every video frame byte-for-byte while avoiding the speech block.
+    """
+    with tempfile.TemporaryDirectory() as tmp:
+        out = Path(tmp) / "silent.mp4"
+        res = subprocess.run(
+            ["ffmpeg", "-y", "-loglevel", "error", "-i", str(video_path), "-c:v", "copy", "-an", str(out)],
+            capture_output=True,
+            check=False,
+        )
+        if res.returncode == 0 and out.is_file() and out.stat().st_size > 0:
+            return out.read_bytes()
+    return video_path.read_bytes()
+
+
 async def _upload_video(page, video_path: Path) -> tuple[str, str]:
     display_name = _unique_display_name(video_path)
     stem = Path(display_name).stem
@@ -126,7 +147,7 @@ async def _upload_video(page, video_path: Path) -> tuple[str, str]:
         async with page.expect_file_chooser(timeout=8000) as fc_info:
             await page.locator(UPLOAD_MENU_ITEM).first.click(timeout=5000)
         chooser = await fc_info.value
-        raw = await asyncio.to_thread(video_path.read_bytes)
+        raw = await asyncio.to_thread(_strip_audio_for_flow_upload, video_path)
         await chooser.set_files({"name": display_name, "mimeType": "video/mp4", "buffer": raw})
         await page.wait_for_timeout(1500)
         # Accept one-time video rights dialog if Flow displays it on a fresh profile.
