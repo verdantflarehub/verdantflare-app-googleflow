@@ -4,10 +4,52 @@ import os
 from pathlib import Path
 import secrets
 import shutil
+import socket
 
 from .gflow_client import GFlow, local_session
 from .policy import Error
 from .queue import DEFAULT_ACCOUNT_ID
+
+
+def cleanup_stale_chrome_locks(home_dir, current_host=None):
+    """Remove stale Chromium SingletonLock/Cookie/Socket left behind by dead pods or dead PIDs."""
+    host = current_host or socket.gethostname()
+    root = Path(home_dir)
+    if not root.exists():
+        return []
+    removed = []
+    candidates = [p for p in root.glob("profile_*") if p.is_dir()]
+    for prof in candidates:
+        lock = prof / "SingletonLock"
+        if not (lock.is_symlink() or lock.exists()):
+            continue
+        stale = False
+        if lock.is_symlink():
+            target = os.readlink(lock)
+            lock_host, _, lock_pid = target.rpartition("-")
+            if lock_host and lock_host != host:
+                stale = True
+            elif lock_pid.isdigit():
+                try:
+                    os.kill(int(lock_pid), 0)
+                except ProcessLookupError:
+                    stale = True
+                except PermissionError:
+                    stale = False
+            else:
+                stale = True
+        else:
+            stale = True
+        if stale:
+            for name in ("SingletonLock", "SingletonCookie", "SingletonSocket"):
+                p = prof / name
+                if p.is_symlink() or p.exists():
+                    try:
+                        p.unlink()
+                        removed.append(str(p))
+                    except OSError:
+                        pass
+    return removed
 
 
 class AccountSlot:
@@ -128,6 +170,7 @@ class AccountSlotManager:
         home_dir, output_dir = self.dirs_for(aid)
         home_dir.mkdir(parents=True, exist_ok=True)
         output_dir.mkdir(parents=True, exist_ok=True)
+        cleanup_stale_chrome_locks(home_dir)
         if aid != DEFAULT_ACCOUNT_ID:
             cfg = home_dir / "config.toml"
             if not cfg.exists():

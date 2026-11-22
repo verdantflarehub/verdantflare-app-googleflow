@@ -445,6 +445,31 @@ class MultiAccountTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(c2.live_calls, 0)
         self.assertGreaterEqual(c1.refresh_triggered + c2.refresh_triggered, 1)
 
+    def test_cleanup_stale_chrome_locks_removes_foreign_pod_lock(self):
+        import os
+        from google_flow_gateway.slots import cleanup_stale_chrome_locks
+
+        prof = self.root / "gflow_home" / "profile_default"
+        prof.mkdir(parents=True)
+        lock = prof / "SingletonLock"
+        cookie = prof / "SingletonCookie"
+        sock = prof / "SingletonSocket"
+        try:
+            os.symlink("google-flow-channel-old-pod-19279", lock)
+            os.symlink("1530825325352225876", cookie)
+            os.symlink("/tmp/com.google.Chrome.old/SingletonSocket", sock)
+        except OSError:
+            # Windows without symlink privilege: create regular files to test fallback path
+            lock.write_text("stale", encoding="utf-8")
+            cookie.write_text("stale", encoding="utf-8")
+            sock.write_text("stale", encoding="utf-8")
+
+        removed = cleanup_stale_chrome_locks(self.root / "gflow_home", current_host="google-flow-channel-new-pod")
+        self.assertTrue(len(removed) >= 1)
+        self.assertFalse(lock.exists() or lock.is_symlink())
+        self.assertFalse(cookie.exists() or cookie.is_symlink())
+        self.assertFalse(sock.exists() or sock.is_symlink())
+
 
 if __name__ == "__main__":
     unittest.main()
