@@ -3,21 +3,24 @@ const $ = id => document.getElementById(id);
 const {appSDK:sdk, dashboardHost:host} = window.$wujie?.props || {};
 const content = $('content'), notice = $('notice');
 const escape = value => String(value ?? '—').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
-const button = (id, text, cls='') => '<button type="button" data-vf="Button" data-act="'+id+'"'+(cls?' class="'+cls+'"':'')+'>'+text+'</button>';
+const button = (id, text, cls='', extra='') => '<button type="button" data-vf="Button" data-act="'+id+'"'+(cls?' class="'+cls+'"':'')+extra+'>'+text+'</button>';
 const get = path => request(sdk,'GET',path);
 const labels = {
   pause:'暂停', resume:'恢复', 'clear-cooldown':'清除冷却',
   bind:'绑定已有媒体', fail:'确认失败并释放预留', retry:'允许重新提交',
   defaults:'恢复默认策略', refresh_balance:'刷新', open_policy:'策略',
-  auth:'授权', close_desktop:'直接关闭桌面', finish_desktop:'完成登录并关闭桌面',
+  auth:'授权', edit_acct:'编辑', delete_acct:'删除',
+  close_desktop:'直接关闭桌面', finish_desktop:'完成登录并关闭桌面',
   reopen_desktop:'重新打开窗口', add_account:'+ 新增账号'
 };
-let revision = 0, busy = false, lastViewerPath = '/apps/google-flow/desktop/', lastEmail = 'Google Flow 账号';
+let revision = 0, busy = false, lastViewerPath = '/apps/google-flow/desktop/';
+let cachedAccounts = [], activePolicyAccount = 'default', filterAccount = '';
 
-function routeSlug() {
-  const slug = location.hash.split('/').pop();
-  if (slug === 'policy') return 'policy';
-  return Object.hasOwn(pages, slug) ? slug : 'accounts';
+function parseRoute() {
+  const parts = location.hash.replace(/^#\/apps\/google-flow\/?/, '').split('/').filter(Boolean);
+  if (parts[0] === 'policy') return {slug: 'policy', accountId: parts[1] || activePolicyAccount || 'default'};
+  const slug = Object.hasOwn(pages, parts[0]) ? parts[0] : 'accounts';
+  return {slug, accountId: null};
 }
 
 function fmtUpdated(ts) {
@@ -29,43 +32,76 @@ function fmtUpdated(ts) {
   return new Date(ts * 1000).toLocaleString();
 }
 
+function proxyTag(proxyUrl) {
+  if (!proxyUrl) return '<span class="gf-pill">默认出口 :1082</span>';
+  const m = proxyUrl.match(/:(\d+)$/);
+  return '<span class="gf-pill gf-pill-proxy" title="' + escape(proxyUrl) + '">独立代理 ' + escape(m ? ':' + m[1] : proxyUrl) + '</span>';
+}
+
+function accountCard(acct) {
+  const aid = acct.id;
+  const paused = acct.status === 'paused';
+  const disabled = !acct.enabled;
+  const live = acct.account || {};
+  const usage = acct.usage || {};
+  const email = live.email || (live.authorized ? '已授权会话' : '未登录账号');
+  const authText = disabled ? '已停用' : paused ? '已暂停' : live.authorized === null ? '无法观测' : live.authorized ? '会话有效' : '需要登录';
+  const badgeCls = disabled ? 'neutral' : paused ? 'paused' : live.authorized ? 'ok' : 'warn';
+  const attr = ' data-account="' + escape(aid) + '"';
+  const pauseRow = paused ? (
+    '<div class="vf-banner danger gf-inline-banner" role="alert"><span>' + escape(reasons[acct.pause?.reason] || '账号已暂停') +
+    (acct.pause?.until ? ' · 冷却至 ' + escape(new Date(acct.pause.until * 1000).toLocaleString()) : ' · 需手动恢复') +
+    '</span><span class="actions">' + button('resume', '恢复', '', attr) + button('clear-cooldown', '清除冷却', '', attr) + '</span></div>'
+  ) : '';
+  const delBtn = (!acct.enabled && aid !== 'default') ? button('delete_acct', labels.delete_acct, 'danger', attr) : '';
+  return '<section class="card gf-acct-card" data-account-card="' + escape(aid) + '">' + pauseRow +
+    '<div class="section-head"><div class="gf-acct-title"><div><div class="gf-acct-head-line"><h2>' + escape(acct.label) + '</h2>' +
+    '<span class="gf-badge ' + badgeCls + '">' + escape(authText) + '</span>' +
+    '<span class="gf-pill">优先级 P' + escape(acct.priority) + '</span>' + proxyTag(acct.proxy_url) +
+    '</div><p class="subline">' + escape(email) + ' · ID: <span class="gf-mono-inline">' + escape(aid) + '</span> · 端口 ' + escape(acct.port) + '</p></div></div>' +
+    '<div class="actions">' +
+    button('refresh_balance', labels.refresh_balance, '', attr) +
+    button('open_policy', labels.open_policy, '', attr) +
+    button('edit_acct', labels.edit_acct, '', attr) +
+    button('auth', labels.auth, '', attr) +
+    (disabled ? '' : button(paused ? 'resume' : 'pause', paused ? labels.resume : labels.pause, '', attr)) +
+    delBtn +
+    '</div></div><div class="c-facts">' +
+    '<div><small>剩余积分</small><strong class="num">' + escape(live.credits) + '</strong></div>' +
+    '<div><small>预留积分</small><strong class="num">' + escape(usage.reserved ?? 0) + '</strong></div>' +
+    '<div><small>余额更新时间</small><strong class="gf-fact-sm">' + escape(fmtUpdated(live.updated_at)) + '</strong></div>' +
+    '<div><small>并发与间隔</small><strong class="gf-fact-sm">并发 ' + escape(acct.policy?.concurrency) + ' · 间隔 ' + escape(acct.policy?.min_interval_seconds) + 's</strong></div>' +
+    '</div></section>';
+}
+
 function accountsView(data) {
-  const paused = data.status === 'paused';
-  const email = data.account?.email || '未登录账号';
-  lastEmail = email;
   if (data.desktop?.viewer_path) lastViewerPath = data.desktop.viewer_path;
   const desktopOpen = Boolean(data.desktop?.open);
-  const pauseBanner = paused ? (
-    '<div class="vf-banner danger" role="alert">' + escape(reasons[data.reason] || '渠道已暂停') +
-    (data.since ? ' · ' + escape(new Date(data.since * 1000).toLocaleString()) : '') +
-    (data.call_id ? ' · ' + escape(data.call_id) : '') +
-    (data.until ? ' · 冷却至 ' + escape(new Date(data.until * 1000).toLocaleString()) : ' · 需手动恢复') +
-    ' <span class="actions">' + button('resume', '恢复') + button('clear-cooldown', '清除冷却') + '</span></div>'
-  ) : '';
   const desktopBanner = desktopOpen ? (
-    '<div class="gf-banner" role="status"><div><strong>登录桌面运行中</strong> · 请在新窗口中完成 Google Flow 登录。</div>' +
+    '<div class="gf-banner" role="status"><div><strong>登录桌面运行中</strong> · 请在新窗口中完成目标账号的 Google Flow 登录。</div>' +
     '<div class="actions">' + button('reopen_desktop', labels.reopen_desktop) +
     button('finish_desktop', labels.finish_desktop, 'gf-primary') +
     button('close_desktop', labels.close_desktop) + '</div></div>'
   ) : '';
-  const authText = data.account?.authorized === null ? '无法观测' : data.account?.authorized ? '会话有效' : '需要登录';
-  const badgeCls = paused ? 'paused' : data.account?.authorized ? 'ok' : 'warn';
-  const badgeText = paused ? '已暂停' : authText;
-  return pauseBanner + desktopBanner +
-    '<section class="card"><div class="section-head"><div class="gf-acct-title"><h2>' + escape(email) + '</h2>' +
-    '<span class="gf-badge ' + badgeCls + '">' + escape(badgeText) + '</span></div>' +
-    '<div class="actions">' + button('refresh_balance', labels.refresh_balance) +
-    button('open_policy', labels.open_policy) + button('auth', labels.auth) +
-    button(paused ? 'resume' : 'pause', paused ? labels.resume : labels.pause) +
-    '</div></div><div class="c-facts">' +
-    '<div><small>剩余积分</small><strong>' + escape(data.account?.credits) + '</strong></div>' +
-    '<div><small>预留积分</small><strong>' + escape(data.today?.reserved ?? 0) + '</strong></div>' +
-    '<div><small>余额更新时间</small><strong class="gf-fact-sm">' + escape(fmtUpdated(data.account?.updated_at)) + '</strong></div>' +
-    '<div><small>并发与间隔</small><strong class="gf-fact-sm">并发 ' + escape(data.policy?.concurrency) + ' · 间隔 ' + escape(data.policy?.min_interval_seconds) + 's</strong></div>' +
-    '</div></section>';
+  const accounts = Array.isArray(data.accounts) && data.accounts.length ? data.accounts : [];
+  cachedAccounts = accounts;
+  const s = data.summary || {
+    total_accounts: accounts.length,
+    active_accounts: accounts.filter(a => a.enabled && a.status === 'active' && a.account?.authorized).length,
+    max_accounts: 8,
+    total_credits: data.account?.credits ?? 0,
+    total_reserved: data.today?.reserved ?? 0,
+  };
+  const summaryBar = '<div class="ledger-summary gf-summary-bar">' +
+    '<span>总可用积分 <b class="num">' + escape(s.total_credits) + '</b></span>' +
+    '<span>活跃账号 <b class="num">' + escape(s.active_accounts) + ' / ' + escape(s.total_accounts) + '</b></span>' +
+    '<span>总预留积分 <b class="num">' + escape(s.total_reserved) + '</b></span>' +
+    '<span>槽位配额 <b class="num">' + escape(s.total_accounts) + ' / ' + escape(s.max_accounts) + '</b></span>' +
+    '</div>';
+  return desktopBanner + summaryBar + '<div class="g-account-list">' + accounts.map(accountCard).join('') + '</div>';
 }
 
-function policyView(data) {
+function policyView(data, accountLabel) {
   const num = (key, label, unit, help, min) =>
     '<label class="gf-field"><span class="gf-field-label">' + label + '<span class="gf-field-unit">' + unit + '</span></span>' +
     '<input required type="number" step="1" min="' + min + '" name="' + key + '" value="' + escape(data[key]) + '">' +
@@ -75,12 +111,12 @@ function policyView(data) {
     Object.entries(choices[key]).map(([v, l]) => '<option value="' + v + '" ' + (data[key] === v ? 'selected' : '') + '>' + l + '</option>').join('') +
     '</select><small>' + help + '</small></label>';
   return '<form id="policy-form"><section class="card gf-policy-card">' +
-    '<div class="gf-form-section"><div class="gf-form-section-head"><h3>并发与提交节奏</h3><p>控制单个 Google Flow 账号的并发任务数与请求频率（本渠道不设今日提交或今日积分限额）。</p></div>' +
+    '<div class="gf-form-section"><div class="gf-form-section-head"><h3>并发与提交节奏</h3><p>控制账号「' + escape(accountLabel) + '」的并发任务数与请求频率。</p></div>' +
     '<div class="gf-form-grid">' +
     num('concurrency', '同时执行的生成数', '个任务', '建议单账号保持 1，避免同一浏览器会话互相抢锁', 1) +
     num('min_interval_seconds', '两次提交最小间隔', '秒', '相邻两次提交之间的最短等待时间，0 表示不额外限速', 0) +
     '</div></div>' +
-    '<div class="gf-form-section"><div class="gf-form-section-head"><h3>风控与异常处理</h3><p>触发上游异常或网络中断时的自动保护动作，防止账号被持续风控或重复扣分。</p></div>' +
+    '<div class="gf-form-section"><div class="gf-form-section-head"><h3>风控与异常处理</h3><p>触发上游异常或网络中断时仅暂停当前账号，不影响其余活跃账号继续接单。</p></div>' +
     '<div class="gf-form-grid">' +
     sel('on_unusual_activity', '遇到 403 UNUSUAL_ACTIVITY', 'Google Flow 返回异常活动拦截时的响应方式') +
     num('cooldown_minutes', '自动冷却时长', '分钟', '填 0 表示暂停后需手动恢复；大于 0 时到期自动恢复', 0) +
@@ -90,6 +126,13 @@ function policyView(data) {
     button('defaults', '恢复默认') + '<button type="submit" data-vf="Button" class="gf-primary">保存策略</button></div></div></section></form>';
 }
 
+function filterBar() {
+  const opts = ['<option value="">全部账号</option>'].concat(
+    cachedAccounts.map(a => '<option value="' + escape(a.id) + '"' + (filterAccount === a.id ? ' selected' : '') + '>' + escape(a.label) + ' (' + escape(a.id) + ')</option>')
+  ).join('');
+  return '<div class="toolbar gf-filter-bar"><label class="gf-filter-label">按账号筛选 <select id="acct-filter">' + opts + '</select></label></div>';
+}
+
 function table(head, rows) {
   return rows.length
     ? '<div class="card"><table><thead><tr>' + head.map(h => '<th>' + h + '</th>').join('') + '</tr></thead><tbody>' + rows.join('') + '</tbody></table></div>'
@@ -97,12 +140,21 @@ function table(head, rows) {
 }
 
 function callsView(data) {
-  return table(['时间／任务', '来源', '操作／模型', '状态', '积分', '处理'], data.map(r =>
+  const list = filterAccount ? data.filter(r => (r.account_id || 'default') === filterAccount) : data;
+  return filterBar() + table(['时间／任务', '账号', '来源', '操作／模型', '状态', '积分', '处理'], list.map(r =>
     '<tr data-id="' + escape(r.call_id) + '" data-rev="' + Number(r.revision) + '"><td>' +
     escape(r.started ? new Date(r.started * 1000).toLocaleString() : null) + '<small>' + escape(r.request_id) + '</small></td><td>' +
+    escape(r.account_label || r.account_id || 'default') + '</td><td>' +
     escape(r.capability === 'video' ? 'Video MCP' : 'Image MCP') + '</td><td>' + escape(r.model) + '</td><td>' +
-    escape(r.state) + '</td><td>' + escape(r.credits) + '</td><td>' +
+    escape(r.state) + '</td><td class="num">' + escape(r.credits) + '</td><td>' +
     (r.state === 'submission_unknown' ? ['bind', 'fail', 'retry'].map(k => button(k, labels[k])).join('') : '—') + '</td></tr>'
+  ));
+}
+
+function auditView(data) {
+  const list = filterAccount ? data.filter(r => (r.account_id || r.detail?.account_id) === filterAccount) : data;
+  return filterBar() + table(['时间', '账号', '操作者', '动作', '详情'], list.map(r =>
+    '<tr>' + [new Date(r.time * 1000).toLocaleString(), r.account_id || r.detail?.account_id || '—', r.actor, r.action, JSON.stringify(r.detail)].map(v => '<td>' + escape(v) + '</td>').join('') + '</tr>'
   ));
 }
 
@@ -110,7 +162,7 @@ function modelsView() {
   const row = (name, id, specs, credits) =>
     '<tr><td><strong>' + name + '</strong><small class="gf-mono">' + id + '</small></td><td><div class="gf-specs">' +
     specs.map(([k, v]) => '<span class="gf-spec"><b>' + k + '：</b>' + v + '</span>').join('') +
-    '</div></td><td><strong>' + credits + '</strong></td></tr>';
+    '</div></td><td><strong class="num">' + credits + '</strong></td></tr>';
   return '<section class="card"><h2>视频模型</h2><p class="gf-note">预留积分为网关保守上限，Google AI Ultra 实际扣分通常低于或等于预留值；未列出的参考类型表示不支持。</p><table><thead><tr><th>模型</th><th>支持规格</th><th>预留积分</th></tr></thead><tbody>' +
     row('Omni 1.2 Flash', 'omni-1.2-flash', [['时长','3–15 秒'],['比例','16:9 / 9:16'],['分辨率','720p（可选 360p）'],['超分导出','1080p'],['帧率','24 fps'],['参考图片','最多 7 张'],['参考视频','1 段']], '10') +
     row('Veo 3.1 Lite', 'veo-lite', [['时长','4 / 6 / 8 秒'],['比例','16:9 / 9:16'],['分辨率','720p'],['帧率','24 fps'],['参考图片','最多 3 张']], '10') +
@@ -124,22 +176,31 @@ function modelsView() {
     '</tbody></table></section>';
 }
 
-function go(slug) {
-  const path = slug === 'accounts' ? '/' : '/' + slug;
-  if (sdk?.navigation?.request) {
-    sdk.navigation.request({target:'app', path}).catch(() => { location.hash = '#/apps/google-flow/' + slug; });
+function go(slug, accountId) {
+  const suffix = slug === 'policy' && accountId ? 'policy/' + accountId : slug;
+  const path = suffix === 'accounts' ? '/' : '/' + suffix;
+  if (sdk?.navigation?.request && slug !== 'policy') {
+    sdk.navigation.request({target:'app', path}).catch(() => { location.hash = '#/apps/google-flow/' + suffix; });
   } else {
-    location.hash = '#/apps/google-flow/' + slug;
+    location.hash = '#/apps/google-flow/' + suffix;
   }
 }
 
+function findAccount(id) {
+  return cachedAccounts.find(a => a.id === id);
+}
+
 async function refresh() {
-  const selected = routeSlug(), current = ++revision;
+  const {slug: selected, accountId} = parseRoute();
+  const current = ++revision;
   const isPolicy = selected === 'policy';
+  if (isPolicy) activePolicyAccount = accountId || 'default';
   $('tabs').hidden = isPolicy;
+  const policyAcct = isPolicy ? findAccount(activePolicyAccount) : null;
+  const policyLabel = policyAcct?.label || activePolicyAccount;
   if (isPolicy) {
-    $('breadcrumb').innerHTML = '应用中心 / 渠道管理 / <button type="button" class="gf-bc-link" data-act="bc_root">Google Flow</button> / ' + escape(lastEmail) + ' / 策略配置';
-    $('page-title').textContent = '策略配置 · ' + lastEmail;
+    $('breadcrumb').innerHTML = '应用中心 / 渠道管理 / <button type="button" class="gf-bc-link" data-act="bc_root">Google Flow</button> / ' + escape(policyLabel) + ' / 策略配置';
+    $('page-title').textContent = '策略配置 · ' + policyLabel;
     $('head-actions').innerHTML = '';
   } else {
     $('breadcrumb').textContent = '应用中心 / 渠道管理 / Google Flow';
@@ -154,15 +215,15 @@ async function refresh() {
   }
   content.textContent = '加载中…';
   try {
-    const endpoint = {accounts:'/overview', policy:'/policy', log:'/calls', audit:'/audit'}[selected];
+    const endpoint = isPolicy
+      ? '/accounts/' + encodeURIComponent(activePolicyAccount) + '/policy'
+      : {accounts:'/overview', log:'/calls', audit:'/audit'}[selected];
     const data = await get(endpoint);
     if (current !== revision) return;
     if (selected === 'accounts') content.innerHTML = accountsView(data);
-    if (selected === 'policy') content.innerHTML = policyView(data);
+    if (isPolicy) content.innerHTML = policyView(data, policyLabel);
     if (selected === 'log') content.innerHTML = callsView(data);
-    if (selected === 'audit') content.innerHTML = table(['时间', '操作者', '动作', '详情'], data.map(r =>
-      '<tr>' + [new Date(r.time * 1000).toLocaleString(), r.actor, r.action, JSON.stringify(r.detail)].map(v => '<td>' + escape(v) + '</td>').join('') + '</tr>'
-    ));
+    if (selected === 'audit') content.innerHTML = auditView(data);
   } catch (e) {
     if (current === revision) { notice.textContent = e.message; content.innerHTML = button('refresh', '重试'); }
   }
@@ -184,12 +245,13 @@ async function mutate(method, path, body, okMsg) {
   }
 }
 
-async function openDesktopPopup() {
+async function openAccountDesktop(accountId) {
   if (busy) return;
   busy = true;
-  notice.textContent = '正在开启登录桌面…';
+  notice.textContent = '正在为账号开启登录桌面…';
   try {
-    const data = await request(sdk, 'POST', '/desktop/open', {});
+    const path = accountId ? '/accounts/' + encodeURIComponent(accountId) + '/desktop/login' : '/desktop/open';
+    const data = await request(sdk, 'POST', path, {});
     const vp = typeof data?.viewer_path === 'string' && /^\/[a-zA-Z0-9/_-]+$/.test(data.viewer_path) ? data.viewer_path : lastViewerPath;
     lastViewerPath = vp;
     window.open(vp, '_blank', 'noopener');
@@ -202,19 +264,59 @@ async function openDesktopPopup() {
   }
 }
 
+function openAccountDialog(acct) {
+  const isEdit = Boolean(acct);
+  $('acct-dialog-title').textContent = isEdit ? '编辑账号 · ' + acct.label : '新增 Google Flow 账号';
+  $('acct-id').value = isEdit ? acct.id : '';
+  $('acct-label').value = isEdit ? acct.label : '';
+  $('acct-priority').value = isEdit ? acct.priority : 100;
+  $('acct-proxy').value = isEdit ? (acct.proxy_url || '') : '';
+  $('acct-enabled-wrap').hidden = !isEdit;
+  $('acct-enabled').checked = isEdit ? Boolean(acct.enabled) : true;
+  $('acct-dialog').showModal();
+}
+
 $('tabs').innerHTML = Object.entries(pages).map(([k, v]) => '<a data-page="' + k + '" href="#/apps/google-flow/' + k + '">' + v + '</a>').join('');
+$('acct-cancel').addEventListener('click', () => $('acct-dialog').close());
+$('acct-form').addEventListener('submit', async e => {
+  e.preventDefault();
+  const id = $('acct-id').value.trim();
+  const payload = {
+    label: $('acct-label').value.trim(),
+    priority: Number($('acct-priority').value),
+    proxy_url: $('acct-proxy').value.trim(),
+  };
+  if (id) payload.enabled = $('acct-enabled').checked;
+  $('acct-dialog').close();
+  if (id) {
+    await mutate('PUT', '/accounts/' + encodeURIComponent(id), payload, '账号配置已更新');
+  } else {
+    await mutate('POST', '/accounts', payload, '新账号已创建，请点击「授权」完成登录');
+  }
+});
+
+content.addEventListener('change', e => {
+  if (e.target.id === 'acct-filter') {
+    filterAccount = e.target.value;
+    refresh();
+  }
+});
 
 $('dashboard').addEventListener('click', async e => {
-  const act = e.target.closest('[data-act]')?.dataset.act;
+  const btn = e.target.closest('[data-act]');
+  const act = btn?.dataset.act;
   if (!act) return;
+  const aid = btn.dataset.account || activePolicyAccount || 'default';
   if (act === 'bc_root') return go('accounts');
-  if (act === 'open_policy') return go('policy');
-  if (act === 'add_account' || act === 'auth') return openDesktopPopup();
+  if (act === 'open_policy') return go('policy', aid);
+  if (act === 'add_account') return openAccountDialog(null);
+  if (act === 'edit_acct') return openAccountDialog(findAccount(aid));
+  if (act === 'auth') return openAccountDesktop(aid);
   if (act === 'reopen_desktop') { window.open(lastViewerPath, '_blank', 'noopener'); return; }
   if (act === 'refresh') return refresh();
   if (act === 'refresh_balance') {
     notice.textContent = '正在实时刷新余额…';
-    const d = await mutate('POST', '/desktop/check-auth', {}, '');
+    const d = await mutate('POST', '/accounts/' + encodeURIComponent(aid) + '/action/refresh', {}, '');
     if (d) notice.textContent = d.authorized ? '余额已刷新：' + (d.credits ?? '—') : '会话已失效，请重新授权';
     return;
   }
@@ -223,10 +325,9 @@ $('dashboard').addEventListener('click', async e => {
     busy = true;
     notice.textContent = '正在校验会话并关闭桌面…';
     try {
-      const auth = await request(sdk, 'POST', '/desktop/check-auth', {});
       await request(sdk, 'POST', '/desktop/close', {});
       await refresh();
-      notice.textContent = auth?.authorized ? '授权有效，已刷新余额并关闭登录桌面' : '桌面已关闭（当前尚未检测到有效会话）';
+      notice.textContent = '已关闭登录桌面并刷新账号列表';
     } catch (err) { notice.textContent = err.message; }
     finally { busy = false; }
     return;
@@ -236,32 +337,33 @@ $('dashboard').addEventListener('click', async e => {
   const row = e.target.closest('tr');
   $('media-label').hidden = act !== 'bind';
   $('media').value = '';
-  $('question').textContent = (labels[act] || act) + '？';
+  $('question').textContent = (labels[act] || act) + (act === 'delete_acct' ? '（' + aid + '）' : '') + '？';
   const dialog = $('confirm');
   dialog.returnValue = '';
   dialog.addEventListener('close', () => {
     if (dialog.returnValue !== 'yes') return;
     if (row) return mutate('POST', '/calls/' + row.dataset.id + '/reconcile', {action:act, revision:Number(row.dataset.rev), media_id:act==='bind'?$('media').value:null});
-    const path = act === 'defaults' ? '/policy/defaults' : '/channel/' + act;
-    mutate('POST', path, {});
+    if (act === 'delete_acct') return mutate('DELETE', '/accounts/' + encodeURIComponent(aid), undefined, '账号已删除');
+    if (act === 'defaults') return mutate('POST', '/accounts/' + encodeURIComponent(aid) + '/policy/defaults', {}, '已恢复默认策略');
+    mutate('POST', '/accounts/' + encodeURIComponent(aid) + '/action/' + act, {});
   }, {once:true});
   dialog.showModal();
 });
 
 content.addEventListener('submit', e => {
+  if (e.target.id !== 'policy-form') return;
   e.preventDefault();
   const data = Object.fromEntries(new FormData(e.target));
   for (const k of Object.keys(data)) if (!choices[k]) data[k] = Number(data[k]);
-  mutate('PUT', '/policy', data, '策略已保存');
+  mutate('PUT', '/accounts/' + encodeURIComponent(activePolicyAccount) + '/policy', data, '策略已保存');
 });
 
 addEventListener('hashchange', refresh);
 const subscriptions = [];
 if (sdk?.navigation?.subscribe) {
   subscriptions.push(sdk.navigation.subscribe(({path}) => {
-    const selected = path.replace(/^\//, '') || 'accounts';
-    const target = selected === 'policy' || Object.hasOwn(pages, selected) ? selected : 'accounts';
-    const hash = '#/apps/google-flow/' + target;
+    const clean = path.replace(/^\//, '') || 'accounts';
+    const hash = '#/apps/google-flow/' + clean;
     if (location.hash !== hash) location.hash = hash;
   }));
   $('tabs').addEventListener('click', async event => {

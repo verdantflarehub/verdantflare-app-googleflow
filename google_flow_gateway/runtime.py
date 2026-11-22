@@ -1,29 +1,27 @@
-"""One lifecycle owns both listeners and dispatch. Desktop hooks are supplied by the image."""
+"""One lifecycle owns both listeners, multi-account slots, and dispatch. Desktop hooks are supplied by the image."""
 import asyncio
 from contextlib import contextmanager
 import json
 import os
 import time
 from pathlib import Path
-import secrets
 import signal
 import socket
 
-import httpx
 import uvicorn
 
 from . import __version__
 from .dashboard import DashboardAssets
 from .discovery import Config, DiscoveryError, Publisher
 from .discovery_store import Store
-from .gflow_client import GFlow, local_session
 from .gpu_lease import Lease
 from .management import management
 from .media import Media
 from .policy import Error
-from .queue import Queue
+from .queue import DEFAULT_ACCOUNT_ID, Queue
 from .scheduler import Scheduler
 from .server import Gateway, execution
+from .slots import AccountSlotManager
 from .turn import credentials
 
 
@@ -33,8 +31,11 @@ class Listener(uvicorn.Server):
         yield
 
 
-async def command(program, *args):
-    proc = await asyncio.create_subprocess_exec(program, *args, stdout=asyncio.subprocess.PIPE,
+async def command(program, *args, extra_env=None):
+    run_env = os.environ.copy()
+    if extra_env:
+        run_env.update(extra_env)
+    proc = await asyncio.create_subprocess_exec(program, *args, env=run_env, stdout=asyncio.subprocess.PIPE,
                                                 stderr=asyncio.subprocess.DEVNULL)
     stdout, _ = await proc.communicate()
     if proc.returncode:
@@ -49,8 +50,11 @@ async def run():
     if min(len(execution_token), len(management_token)) < 32 or execution_token == management_token:
         raise ValueError("invalid_listener_tokens")
     state = Path(env.get("GOOGLE_FLOW_STATE_DIR", "/data/google-flow/state"))
-    output = Path(env.get("GFLOW_CLI_OUTPUT_DIR", "/data/google-flow/output"))
+    default_home = Path(env.get("GFLOW_CLI_HOME", "/data/google-flow/gflow"))
+    default_output = Path(env.get("GFLOW_CLI_OUTPUT_DIR", "/data/google-flow/output"))
+    accounts_root = Path(env.get("GOOGLE_FLOW_ACCOUNTS_DIR", str(state.parent / "accounts")))
     state.mkdir(parents=True, exist_ok=True)
+    accounts_root.mkdir(parents=True, exist_ok=True)
     assets = DashboardAssets(env["GOOGLE_FLOW_DASHBOARD_DIR"])
     org, station = env["GOOGLE_FLOW_ORGANIZATION_ID"], env["GOOGLE_FLOW_STATION_ID"]
     hook = env["GOOGLE_FLOW_DESKTOP_CONTROL"]
@@ -64,39 +68,13 @@ async def run():
                         boot_id=Path("/proc/sys/kernel/random/boot_id").read_text().strip())
         scheduler = Scheduler(env["GOOGLE_FLOW_SCHEDULER_URL"], env["GOOGLE_FLOW_SCHEDULER_TOKEN"], gpu,
                               int(env["GOOGLE_FLOW_PEAK_BUDGET_MIB"]))
-    token = secrets.token_urlsafe(48)
-    client = GFlow(local_session(token), json.loads(env.get("GOOGLE_FLOW_MODEL_CREDITS", "{}")))
-    daemon = None
-
-    async def settle():
-        nonlocal daemon
-        if daemon and daemon.returncode is None:
-            daemon.terminate()
-            await daemon.wait()
-        daemon = None
-        await command(hook, "stop-and-wait-for-zero-gpu-processes")
-
-    async def desktop(action):
-        if action == "turn":
-            if no_gpu:
-                raise Error("desktop_turn_disabled", 404)
-            rtc_path = env.get("GOOGLE_FLOW_RTC_FILE")
-            if rtc_path and Path(rtc_path).is_file():
-                try:
-                    expires_at = json.loads(Path(rtc_path).read_text(encoding="utf-8")).get("expires_at", 0)
-                except (OSError, ValueError):
-                    expires_at = 0
-                if expires_at - time.time() < 120:
-                    await command(hook, "open")
-            return credentials(env["GOOGLE_FLOW_TURN_URLS"].split(","), env["GOOGLE_FLOW_TURN_SECRET"])
-        if action not in ("status", "open", "close", "login"):
-            raise Error("invalid_field", field="action")
-        return json.loads(await command(hook, action))
+    prices = json.loads(env.get("GOOGLE_FLOW_MODEL_CREDITS", "{}"))
 
     # Bind both sockets before touching the durable queue or starting the display daemon.
     sockets, servers, tasks = [], [], []
     stop = asyncio.Event()
-    q = lease = publisher = None
+    q = lease = publisher = slot_mgr = None
+    desktop_account_id = DEFAULT_ACCOUNT_ID
     try:
         for port in (8000, 8001):
             sock = socket.socket()
@@ -104,11 +82,59 @@ async def run():
             sock.bind(("0.0.0.0", port))
             sock.setblocking(False)
         q = Queue(state / "queue.sqlite3")
+        slot_mgr = AccountSlotManager(q, env, prices, default_home, default_output, accounts_root)
+
+        async def settle():
+            await slot_mgr.stop_all()
+            await command(hook, "stop-and-wait-for-zero-gpu-processes")
+
+        async def desktop(action, account_id=None):
+            nonlocal desktop_account_id
+            if action == "turn":
+                if no_gpu:
+                    raise Error("desktop_turn_disabled", 404)
+                rtc_path = env.get("GOOGLE_FLOW_RTC_FILE")
+                if rtc_path and Path(rtc_path).is_file():
+                    try:
+                        expires_at = json.loads(Path(rtc_path).read_text(encoding="utf-8")).get("expires_at", 0)
+                    except (OSError, ValueError):
+                        expires_at = 0
+                    if expires_at - time.time() < 120:
+                        await command(hook, "open")
+                return credentials(env["GOOGLE_FLOW_TURN_URLS"].split(","), env["GOOGLE_FLOW_TURN_SECRET"])
+            if action not in ("status", "open", "close", "login"):
+                raise Error("invalid_field", field="action")
+            extra_env = None
+            if action in ("open", "login"):
+                aid = account_id or DEFAULT_ACCOUNT_ID
+                acct = q.get_account(aid)
+                home_dir, _ = slot_mgr.dirs_for(aid)
+                home_dir.mkdir(parents=True, exist_ok=True)
+                proxy = slot_mgr.effective_proxy(acct["proxy_url"])
+                extra_env = {
+                    "GOOGLE_FLOW_LOGIN_ACCOUNT_ID": aid,
+                    "GOOGLE_FLOW_LOGIN_HOME": str(home_dir),
+                    "GOOGLE_FLOW_LOGIN_PROXY": proxy,
+                }
+                desktop_account_id = aid
+            prev_aid = desktop_account_id
+            result = json.loads(await command(hook, action, extra_env=extra_env))
+            if action == "close":
+                try:
+                    slot_mgr.client_for(prev_aid).trigger_account_refresh()
+                except Error:
+                    pass
+            if result.get("open"):
+                result["account_id"] = desktop_account_id
+            else:
+                result["account_id"] = None
+            return result
+
         if not no_gpu:
             lease = Lease(q, scheduler, identity, gpu, settle,
                           int(env.get("GOOGLE_FLOW_LEASE_RECONCILE_TIMEOUT_MINUTES", "30")))
-        g = Gateway(q, client, Media(state / "cache"), output, org)
-        g.admitted = lambda: (True if no_gpu else lease.valid) and daemon is not None and daemon.returncode is None
+        g = Gateway(q, None, Media(state / "cache"), default_output, org, slots=slot_mgr)
+        g.admitted = lambda: (True if no_gpu else lease.valid) and slot_mgr.any_alive()
         apps = [execution(g, execution_token), management(g, management_token, station, assets, lease, desktop)]
         for app, sock in zip(apps, sockets):
             server = Listener(uvicorn.Config(app, access_log=False, log_level="warning"))
@@ -121,33 +147,20 @@ async def run():
                 dict(capability_id=k, adapter_version="1", execution_state="adapter_connected_unverified")
                 for k in ("image", "video")])
 
-        async def start_daemon():
-            nonlocal daemon
+        async def start_slots():
             await command(hook, "start")
-            allowed = {"PATH", "HOME", "DO_NOT_TRACK", "LANG", "LC_ALL", "DISPLAY", "WAYLAND_DISPLAY",
-                       "DBUS_SESSION_BUS_ADDRESS", "HTTPS_PROXY", "HTTP_PROXY", "NO_PROXY"}
-            process_env = {key: value for key, value in env.items()
-                           if key.upper() in allowed or key.startswith(("XDG_", "GFLOW_CLI_"))}
-            process_env.update(GFLOW_CLI_DAEMON_TOKEN=token, GFLOW_CLI_TELEMETRY="0",
-                               GFLOW_CLI_UPDATE_CHECK="false", GFLOW_CLI_INCIDENT_CAPTURE="false")
-            daemon = await asyncio.create_subprocess_exec("gflow", "serve", "--host", "127.0.0.1",
-                 "--port", "18000", env=process_env, stdout=asyncio.subprocess.DEVNULL,
-                 stderr=asyncio.subprocess.DEVNULL)
-            async def _warmup():
-                await asyncio.sleep(3)
-                client.trigger_account_refresh()
-            asyncio.create_task(_warmup())
+            await slot_mgr.sync_all()
 
         async def lifecycle():
             while not stop.is_set():
                 if no_gpu:
-                    if daemon is None or daemon.returncode is not None:
-                        await start_daemon()
+                    await start_slots()
                 elif not lease.valid:
                     if await lease.recover():
-                        await start_daemon()
+                        await start_slots()
                 else:
                     await lease.heartbeat()
+                    await slot_mgr.sync_all()
                 await asyncio.sleep(30)
 
         async def work():
@@ -170,7 +183,7 @@ async def run():
 
         async def publish():
             while True:
-                active = (True if no_gpu else lease.valid) and not q.setting("pause")
+                active = (True if no_gpu else lease.valid) and q.any_active_account()
                 try:
                     await asyncio.to_thread(publisher.set_state, "enabled" if active else "disabled",
                                             "ready" if active else "paused")
@@ -178,45 +191,34 @@ async def run():
                 except DiscoveryError:
                     if publisher.fenced:
                         raise
-                await asyncio.sleep(60)
+                await asyncio.sleep(15)
 
-        tasks.extend([asyncio.create_task(lifecycle()), asyncio.create_task(work())])
+        loop = asyncio.get_running_loop()
+        for sig in (signal.SIGTERM, signal.SIGINT):
+            loop.add_signal_handler(sig, stop.set)
+        tasks.append(asyncio.create_task(lifecycle()))
+        tasks.append(asyncio.create_task(work()))
         if publisher:
             tasks.append(asyncio.create_task(publish()))
-        for sig in (signal.SIGINT, signal.SIGTERM):
-            signal.signal(sig, lambda *_: stop.set())
-        tasks.append(asyncio.create_task(stop.wait()))
-        done, _ = await asyncio.wait(tasks, return_when=asyncio.FIRST_COMPLETED)
-        for task in done:
-            task.result()
+        await stop.wait()
     finally:
-        stop.set()
         for server in servers:
             server.should_exit = True
-        for task in tasks[len(servers):]:
+        for task in tasks:
             task.cancel()
         await asyncio.gather(*tasks, return_exceptions=True)
-        try:
-            if lease and lease.valid:
-                await lease.close()
-            elif no_gpu:
-                await settle()
-        finally:
-            if publisher:
-                await asyncio.to_thread(publisher.close)
-            for sock in sockets:
-                sock.close()
-            if q:
-                q.db.close()
-            if scheduler:
-                await scheduler.http.aclose()
+        if slot_mgr is not None:
+            await slot_mgr.stop_all()
+        if publisher:
+            await asyncio.to_thread(publisher.close)
+        if lease is not None:
+            await lease.release()
+        for sock in sockets:
+            sock.close()
 
 
 def main():
-    try:
-        asyncio.run(run())
-    except (OSError, RuntimeError, ValueError, KeyError, Error, httpx.HTTPError):
-        raise SystemExit("gateway_startup_or_listener_failed") from None
+    asyncio.run(run())
 
 
 if __name__ == "__main__":

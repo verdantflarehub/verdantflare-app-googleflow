@@ -53,30 +53,66 @@ async def handle_error(request, exc):
     return reply({"code": exc.code, "field": exc.field}, exc.status)
 
 
-def view(row, result_meta=None):
+def view(row, result_meta=None, account_label=None):
     if row is None:
         raise Error("not_found", 404)
     accepted = None if row["accepted"] is None else bool(row["accepted"])
     payload = json.loads(row["payload"])
+    account_id = row["account_id"] if "account_id" in row.keys() else "default"
     data = dict(call_id=row["id"], request_id=row["key"], accepted=accepted, state=row["state"],
                 started=row["started"], model=payload.get("model"), capability=payload.get("capability"),
                 status=row["state"], reason_code=row["reason"], revision=row["revision"],
-                reserved=row["reserve"], credits=None if row["reason"] == "charge_unconfirmed" else row["spent"])
+                reserved=row["reserve"], credits=None if row["reason"] == "charge_unconfirmed" else row["spent"],
+                account_id=account_id)
+    if account_label is not None:
+        data["account_label"] = account_label
     if isinstance(result_meta, dict) and result_meta.get("upscale_status"):
         data["upscale_status"] = result_meta["upscale_status"]
-        data["upscale_target"] = result_meta.get("upscale_target")
+        data["upscale_target"] = result_meta["upscale_target"]
     return data
 
 
 class Gateway:
-    def __init__(self, queue, client, media, output, org):
+    def __init__(self, queue, client, media, output, org, slots=None):
         self.q, self.client, self.media, self.output, self.org = queue, client, media, output, org
+        self.slots = slots
         self.admitted = lambda: True
         self._inflight = set()
         self.q.db.executescript("""
             CREATE TABLE IF NOT EXISTS inputs(owner TEXT, digest TEXT, PRIMARY KEY(owner,digest));
             CREATE TABLE IF NOT EXISTS results(id TEXT PRIMARY KEY, metadata TEXT);
         """)
+
+    def client_for(self, account_id="default"):
+        if self.slots is not None:
+            if isinstance(self.slots, dict):
+                if account_id in self.slots:
+                    return self.slots[account_id]
+                raise Error("channel_unavailable", 503)
+            return self.slots.client_for(account_id)
+        return self.client
+
+    def output_for(self, account_id="default"):
+        if self.slots is not None and not isinstance(self.slots, dict):
+            return self.slots.output_for(account_id)
+        return self.output
+
+    def _active_clients(self):
+        if self.slots is None:
+            return {"default": self.client}
+        if isinstance(self.slots, dict):
+            return dict(self.slots)
+        return {aid: slot.client for aid, slot in self.slots.slots.items() if slot.alive}
+
+    def any_client(self):
+        clients = self._active_clients()
+        if "default" in clients:
+            return clients["default"]
+        if clients:
+            return next(iter(clients.values()))
+        if self.client is not None:
+            return self.client
+        raise Error("channel_unavailable", 503)
 
     def owner(self, request):
         org = header(request, "x-organization-id")
@@ -85,11 +121,15 @@ class Gateway:
         return encode([org, header(request, "x-project-id"), header(request, "x-user-id")])
 
     def normalize(self, data):
-        if set(data) - {"capability", "model", "parameters", "budget_limit", "idempotency_key", "request_id"}:
+        if set(data) - {"capability", "model", "parameters", "budget_limit", "idempotency_key", "request_id", "channel_account_id"}:
             raise Error("invalid_field")
         key = data.get("idempotency_key", data.get("request_id"))
         if not isinstance(key, str) or not ID.fullmatch(key) or data.get("request_id", key) != key:
             raise Error("invalid_field", field="idempotency_key")
+        channel_account_id = data.get("channel_account_id")
+        if channel_account_id is not None:
+            if not isinstance(channel_account_id, str) or not ID.fullmatch(channel_account_id):
+                raise Error("invalid_field", field="channel_account_id")
         kind, model, args = data.get("capability"), data.get("model"), data.get("parameters")
         if not isinstance(kind, str) or not isinstance(model, str) or model not in MODELS.get(kind, ()):
             raise Error("capability_not_supported")
@@ -122,7 +162,10 @@ class Gateway:
         limit = data.get("budget_limit")
         if limit is not None and (type(limit) is not int or not 0 <= limit <= 2**31-1):
             raise Error("invalid_field", field="budget_limit")
-        return key, dict(capability=kind, model=model, parameters=args, budget_limit=limit)
+        norm = dict(capability=kind, model=model, parameters=args, budget_limit=limit)
+        if channel_account_id is not None:
+            norm["channel_account_id"] = channel_account_id
+        return key, norm
 
     def references(self, owner, payload):
         refs = payload["parameters"].get("reference_images", [])
@@ -161,31 +204,66 @@ class Gateway:
                     args["mode"] = "r2v"
             if payload["capability"] == "video" and payload["model"].startswith("veo-") and args.get("duration") == 8:
                 args.pop("duration", None)
-            acct = await self.client.account()
-            if not acct["authorized"]:
-                with self.q.transaction():
-                    self.q.pause("authorization_required", call_id=row["id"])
-                raise Error("authorization_required", 403)
-            catalog = await self.client.catalog()
+            requested_acct = payload.get("channel_account_id")
+            active_clients = self._active_clients()
+            if requested_acct:
+                target_ids = [requested_acct]
+            else:
+                target_ids = [
+                    a["id"] for a in self.q.list_accounts()
+                    if a["enabled"] and a["status"] == "active" and a["id"] in active_clients
+                ]
+            if not target_ids:
+                if requested_acct:
+                    raise Error("channel_unavailable", 503)
+                raise Error("channel_paused", 409)
+
+            balances = {}
+            unauthorized_ids = []
+            for aid in target_ids:
+                c = self.client_for(aid)
+                try:
+                    acct = await c.account()
+                except Error:
+                    if requested_acct:
+                        raise
+                    continue
+                if not acct.get("authorized"):
+                    unauthorized_ids.append(aid)
+                    with self.q.transaction():
+                        self.q.pause("authorization_required", call_id=row["id"], account_id=aid)
+                    continue
+                balances[aid] = acct["credits"]
+
+            if not balances:
+                if unauthorized_ids:
+                    raise Error("authorization_required", 403)
+                raise Error("channel_unavailable", 503)
+
+            first_client = self.client_for(next(iter(balances)))
+            catalog = await first_client.catalog()
             if payload["model"] not in catalog["models"][payload["capability"]]:
                 raise Error("capability_not_supported")
-            quote = self.client.quote(payload)
+            quote = first_client.quote(payload)
             if not self.admitted():
                 raise Error("gpu_lease_lost", 503)
-            if not self.q.admit(row["id"], quote, acct["credits"]):
+            chosen_id = self.q.admit_multi(row["id"], quote, balances, explicit_account_id=requested_acct)
+            if not chosen_id:
                 return
+            slot_client = self.client_for(chosen_id)
+            slot_output = self.output_for(chosen_id)
             try:
                 if vpaths and payload["capability"] == "video":
-                    result = await self.client.generate_video_edit(
+                    result = await slot_client.generate_video_edit(
                         prompt=args["prompt"],
                         video_path=vpaths[0],
                         reference_images=paths,
                         aspect=args.get("aspect", "16:9"),
                         duration=args.get("duration"),
-                        output_dir=self.output,
+                        output_dir=slot_output,
                     )
                 else:
-                    result = await self.client.tool("gflow_generate_" + payload["capability"], model=payload["model"], **args)
+                    result = await slot_client.tool("gflow_generate_" + payload["capability"], model=payload["model"], **args)
             except Error:
                 result = {}
             media = result.get("flow_media_id")
@@ -204,8 +282,11 @@ class Gateway:
             self._inflight.discard(row["id"])
 
     async def collect(self, row, result=None):
+        aid = row["account_id"] if "account_id" in row.keys() else "default"
+        slot_client = self.client_for(aid)
+        slot_output = self.output_for(aid)
         if not result or not result.get("files"):
-            result = await self.client.tool("gflow_download_media", media_id=row["media"])
+            result = await slot_client.tool("gflow_download_media", media_id=row["media"])
             paths = [result.get("path")]
         else:
             paths = result["files"]
@@ -223,7 +304,7 @@ class Gateway:
             if isinstance(result, dict) and isinstance(result.get("project_id"), str) and result["project_id"]:
                 up_args["project"] = result["project_id"]
             try:
-                up = await self.client.tool(up_tool, **up_args)
+                up = await slot_client.tool(up_tool, **up_args)
                 up_path = up.get("path") if isinstance(up, dict) else None
                 if isinstance(up_path, str) and Path(up_path).is_file():
                     chosen_path = up_path
@@ -233,7 +314,7 @@ class Gateway:
             except Exception:
                 upscale_status = "fallback_original"
         mime = "video/mp4" if kind == "video" else {".jpg": "image/jpeg", ".jpeg": "image/jpeg", ".webp": "image/webp"}.get(Path(chosen_path).suffix.lower(), "image/png")
-        meta = self.media.collect(chosen_path, self.output, mime)
+        meta = self.media.collect(chosen_path, slot_output, mime)
         if upscale_status:
             meta["upscale_status"] = upscale_status
             meta["upscale_target"] = upscale
@@ -247,7 +328,7 @@ class Gateway:
             self.q.db.execute("UPDATE calls SET state='succeeded',reason=?,spent=?,reserve=? WHERE id=?",
                               (None if confirmed else "charge_unconfirmed", spent if confirmed else 0,
                                0 if confirmed else current["reserve"], row["id"]))
-            audit_detail = {"call_id": row["id"], "actual_credits": spent if confirmed else None}
+            audit_detail = {"account_id": aid, "call_id": row["id"], "actual_credits": spent if confirmed else None}
             if upscale_status:
                 audit_detail["upscale_status"] = upscale_status
                 audit_detail["upscale_target"] = upscale
@@ -256,7 +337,7 @@ class Gateway:
     async def tick(self):
         import asyncio
         with self.q.transaction():
-            if self.q.status()["status"] != "active":
+            if not self.q.any_active_account():
                 return
             rows = self.q.db.execute("SELECT * FROM calls WHERE state IN ('pending','running') ORDER BY rowid").fetchall()
         async def advance(row):
@@ -278,9 +359,32 @@ def execution(g, token):
         owner = g.owner(request)
         path = request.url.path
         if path == "/v1/account":
-            return reply(await g.client.account())
+            accts_summary = []
+            total_credits = 0
+            any_auth = False
+            for a in g.q.list_accounts():
+                info = {"authorized": None, "credits": None}
+                try:
+                    c = g.client_for(a["id"])
+                    info = await c.account()
+                except Error:
+                    pass
+                if a["enabled"] and a["status"] == "active" and info.get("authorized"):
+                    any_auth = True
+                    if isinstance(info.get("credits"), int):
+                        total_credits += info["credits"]
+                accts_summary.append({
+                    "id": a["id"], "label": a["label"], "enabled": a["enabled"],
+                    "status": a["status"], "priority": a["priority"],
+                    "authorized": info.get("authorized"), "credits": info.get("credits"),
+                })
+            return reply({
+                "authorized": any_auth,
+                "credits": total_credits if any_auth else None,
+                "accounts": accts_summary,
+            })
         if path in ("/v1/capabilities", "/v1/models"):
-            return reply(await g.client.catalog())
+            return reply(await g.any_client().catalog())
         if path == "/v1/inputs":
             digest = request.headers.get("x-content-sha256", "")
             meta = g.media.put(await body(request, MAX_SIZE), request.headers.get("content-type"), digest)
@@ -291,7 +395,7 @@ def execution(g, token):
             data = await object_body(request)
             key, payload = g.normalize(data if path != "/v1/cost" else data | {"request_id": "quote"})
             if path == "/v1/cost":
-                return reply({"credits": g.client.quote(payload)})
+                return reply({"credits": g.any_client().quote(payload)})
             g.references(owner, payload)
             g.video_references(owner, payload)
             row = g.q.intent(owner, key, payload)

@@ -38,6 +38,19 @@ def wait_port(port, timeout=10.0):
     raise RuntimeError(f"KasmVNC port {port} unavailable")
 
 
+def _write_login_env():
+    """Write per-account Chrome profile & proxy selection for supervisord flow-login."""
+    runtime_dir = Path(os.environ.get("XDG_RUNTIME_DIR", "/run/user/1000"))
+    runtime_dir.mkdir(parents=True, exist_ok=True)
+    home = os.environ.get("GOOGLE_FLOW_LOGIN_HOME") or os.environ.get("GFLOW_CLI_HOME", "/data/google-flow/gflow")
+    proxy = os.environ.get("GOOGLE_FLOW_LOGIN_PROXY") or os.environ.get("GFLOW_CLI_BROWSER_PROXY", "")
+    acct_id = os.environ.get("GOOGLE_FLOW_LOGIN_ACCOUNT_ID") or "default"
+    (runtime_dir / "google-flow-login.json").write_text(
+        json.dumps({"account_id": acct_id, "home": home, "proxy": proxy}),
+        encoding="utf-8",
+    )
+
+
 def handle(action):
     if action == "start":
         change("xvfb", True)
@@ -56,6 +69,8 @@ def handle(action):
                 time.sleep(0.3)
             return {"open": False}
     elif action == "open":
+        _write_login_env()
+        change("flow-login", False)
         change("kasmvnc", True)
         wait_port(KASMVNC_PORT, timeout=10.0)
         change("openbox", True)
@@ -63,6 +78,8 @@ def handle(action):
     elif action == "login":
         if not running("kasmvnc"):
             raise RuntimeError("open desktop first")
+        _write_login_env()
+        change("flow-login", False)
         change("flow-login", True)
     elif action != "status":
         raise ValueError("unknown desktop action")

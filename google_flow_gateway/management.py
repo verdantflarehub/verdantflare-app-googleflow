@@ -7,6 +7,7 @@ from starlette.responses import Response
 from starlette.routing import Route
 
 from .policy import DEFAULTS, Error
+from .queue import DEFAULT_ACCOUNT_ID
 from .server import ID, bearer, handle_error, header, object_body, reply, view
 
 _WEBCLIENT_SUFFIXES = {".html", ".js", ".css", ".svg", ".png", ".ico", ".woff", ".woff2", ".ttf", ".json"}
@@ -20,7 +21,43 @@ _DEFAULT_DESKTOP_SETTINGS = {
 }
 
 
+async def _account_snapshot(g, account_id, force_refresh=False):
+    try:
+        client = g.client_for(account_id)
+        if not force_refresh and hasattr(client, "cached_account"):
+            return await client.cached_account()
+        return await client.account()
+    except Error:
+        return {"authorized": None, "credits": None}
+
+
 def management(g, token, station, assets=None, lease=None, desktop=None):
+    async def _build_accounts_payload():
+        items = []
+        total_credits = 0
+        total_reserved = 0
+        active_accounts = 0
+        for acct in g.q.list_accounts():
+            aid = acct["id"]
+            live = await _account_snapshot(g, aid)
+            usage = g.q.usage(aid)
+            if isinstance(live.get("credits"), int):
+                total_credits += live["credits"]
+            total_reserved += usage["reserved"]
+            if acct["enabled"] and acct["status"] == "active" and live.get("authorized"):
+                active_accounts += 1
+            items.append(acct | {"account": live, "usage": usage})
+        return {
+            "accounts": items,
+            "summary": {
+                "total_accounts": len(items),
+                "active_accounts": active_accounts,
+                "max_accounts": g.q.max_accounts,
+                "total_credits": total_credits,
+                "total_reserved": total_reserved,
+            },
+        }
+
     async def handle(request):
         bearer(request, token)
         path = request.url.path
@@ -40,45 +77,123 @@ def management(g, token, station, assets=None, lease=None, desktop=None):
         if header(request, "x-organization-id") != g.org or header(request, "x-station-id") != station:
             raise Error("forbidden", 403)
         q = g.q
+
+        # --- Multi-account management endpoints ---
+        if path == "/accounts":
+            if request.method == "POST":
+                acct = q.create_account(await object_body(request), actor)
+                if g.slots is not None and not isinstance(g.slots, dict):
+                    await g.slots.sync_all()
+                return reply(acct, status=201)
+            return reply(await _build_accounts_payload())
+
+        if path.startswith("/accounts/"):
+            aid = request.path_params["account_id"]
+            if path == f"/accounts/{aid}":
+                if request.method == "PUT":
+                    acct, proxy_changed = q.update_account(aid, await object_body(request), actor)
+                    if g.slots is not None and not isinstance(g.slots, dict):
+                        if proxy_changed:
+                            await g.slots.restart_slot(aid)
+                        else:
+                            await g.slots.sync_all()
+                    return reply(acct)
+                if request.method == "DELETE":
+                    res = q.delete_account(aid, actor)
+                    if g.slots is not None and not isinstance(g.slots, dict):
+                        await g.slots.sync_all()
+                        g.slots.cleanup_deleted_dirs(aid)
+                    return reply(res)
+                acct = q.get_account(aid)
+                return reply(acct | {"account": await _account_snapshot(g, aid), "usage": q.usage(aid)})
+
+            if path == f"/accounts/{aid}/policy":
+                if request.method == "PUT":
+                    q.configure(await object_body(request), actor, account_id=aid)
+                return reply(q.account_policy(aid))
+
+            if path == f"/accounts/{aid}/policy/defaults":
+                q.configure(DEFAULTS, actor, account_id=aid)
+                return reply(q.account_policy(aid))
+
+            if path.startswith(f"/accounts/{aid}/action/"):
+                act = request.path_params["action"]
+                if act == "refresh":
+                    live = await _account_snapshot(g, aid, force_refresh=True)
+                    with q.transaction():
+                        q.audit(actor, "balance_refresh", {"account_id": aid, "credits": live.get("credits")})
+                    return reply(live)
+                q.action(act, actor, True if lease is None else bool(lease.valid), account_id=aid)
+                return reply({"ok": True})
+
+            if path == f"/accounts/{aid}/desktop/login":
+                if not desktop:
+                    raise Error("desktop_unavailable", 503)
+                if lease is not None and not lease.valid:
+                    raise Error("gpu_lease_lost", 409)
+                acct = q.get_account(aid)
+                result = await desktop("open", account_id=aid)
+                with q.transaction():
+                    q.audit(actor, "desktop_login", {"account_id": aid, "proxy_url": acct["proxy_url"]})
+                return reply(result | {"account_id": aid})
+
+            if path == f"/accounts/{aid}/desktop/check-auth":
+                return reply(await _account_snapshot(g, aid, force_refresh=True))
+
+        # --- Legacy single-account compatible endpoints (default / aggregate) ---
         if path == "/overview":
-            try:
-                if hasattr(g.client, "cached_account"):
-                    account = await g.client.cached_account()
-                else:
-                    account = await g.client.account()
-            except Error:
-                account = {"authorized": None, "credits": None}
+            account = await _account_snapshot(g, DEFAULT_ACCOUNT_ID)
             desktop_state = {"open": False, "available": False}
             if desktop:
                 try:
                     desktop_state = await desktop("status")
                 except Error:
                     desktop_state = {"open": False, "available": False}
+            accounts_payload = await _build_accounts_payload()
             with q.transaction():
-                status = q.status()
+                status = q.status(DEFAULT_ACCOUNT_ID)
                 timed_out = bool(status.get("reason") == "gpu_lease_lost" and q.db.execute(
                     "SELECT 1 FROM audit WHERE action='lease_reconcile_timeout' AND time>=? LIMIT 1",
                     (status["since"],)).fetchone())
-                return reply(status | {"account": account, "today": q.usage(), "policy": q.setting("policy"),
-                                      "desktop": desktop_state,
-                                      "lease_valid": True if lease is None else bool(lease.valid),
-                                      "no_gpu": lease is None,
-                                      "lease_reconcile_timeout": timed_out})
+                return reply(status | {
+                    "account": account,
+                    "accounts": accounts_payload["accounts"],
+                    "summary": accounts_payload["summary"],
+                    "today": q.usage(DEFAULT_ACCOUNT_ID),
+                    "policy": q.account_policy(DEFAULT_ACCOUNT_ID),
+                    "desktop": desktop_state,
+                    "lease_valid": True if lease is None else bool(lease.valid),
+                    "no_gpu": lease is None,
+                    "lease_reconcile_timeout": timed_out,
+                })
         if path == "/policy":
             if request.method == "PUT":
-                q.configure(await object_body(request), actor)
-            return reply(q.setting("policy"))
+                q.configure(await object_body(request), actor, account_id=DEFAULT_ACCOUNT_ID)
+            return reply(q.account_policy(DEFAULT_ACCOUNT_ID))
         if path == "/policy/defaults":
-            q.configure(DEFAULTS, actor)
-            return reply(q.setting("policy"))
+            q.configure(DEFAULTS, actor, account_id=DEFAULT_ACCOUNT_ID)
+            return reply(q.account_policy(DEFAULT_ACCOUNT_ID))
         if path.startswith("/channel/"):
-            q.action(request.path_params["action"], actor, True if lease is None else bool(lease.valid))
+            q.action(request.path_params["action"], actor, True if lease is None else bool(lease.valid),
+                     account_id=DEFAULT_ACCOUNT_ID)
             return reply({"ok": True})
         if path == "/calls":
-            return reply([view(row) for row in q.db.execute("SELECT * FROM calls ORDER BY rowid DESC LIMIT 200")])
+            filter_acct = request.query_params.get("account_id")
+            labels = {a["id"]: a["label"] for a in q.list_accounts()}
+            if filter_acct:
+                rows = q.db.execute("SELECT * FROM calls WHERE account_id=? ORDER BY rowid DESC LIMIT 200", (filter_acct,))
+            else:
+                rows = q.db.execute("SELECT * FROM calls ORDER BY rowid DESC LIMIT 200")
+            return reply([view(row, account_label=labels.get(row["account_id"], row["account_id"])) for row in rows])
         if path == "/audit":
-            return reply([dict(row) | {"detail": json.loads(row["detail"])} for row in
-                          q.db.execute("SELECT * FROM audit ORDER BY id DESC LIMIT 200")])
+            filter_acct = request.query_params.get("account_id")
+            out = []
+            for row in q.db.execute("SELECT * FROM audit ORDER BY id DESC LIMIT 200"):
+                detail = json.loads(row["detail"])
+                if filter_acct and detail.get("account_id") != filter_acct:
+                    continue
+                out.append(dict(row) | {"detail": detail, "account_id": detail.get("account_id")})
+            return reply(out)
         if path.startswith("/calls/"):
             data = await object_body(request)
             media_id = data.get("media_id")
@@ -104,7 +219,7 @@ def management(g, token, station, assets=None, lease=None, desktop=None):
             })
         action = request.path_params.get("action", "status")
         if action == "check-auth":
-            return reply(await g.client.account())
+            return reply(await _account_snapshot(g, DEFAULT_ACCOUNT_ID, force_refresh=True))
         if not desktop:
             if action == "status":
                 return reply({"open": False, "available": False})
@@ -114,12 +229,19 @@ def management(g, token, station, assets=None, lease=None, desktop=None):
         result = await desktop(action)
         if request.method != "GET":
             with q.transaction():
-                q.audit(actor, "desktop_" + action, {})
+                q.audit(actor, "desktop_" + action, {"account_id": DEFAULT_ACCOUNT_ID})
         return reply(result)
 
     routes = [Route(path, handle) for path in ("/overview", "/calls", "/audit", "/desktop",
               "/desktop/settings", "/desktop/assets/{asset:path}",
               "/internal/dashboard-declaration", "/internal/dashboard-index", "/internal/dashboard/{asset:path}")]
+    routes.append(Route("/accounts", handle, methods=["GET", "POST"]))
+    routes.append(Route("/accounts/{account_id}", handle, methods=["GET", "PUT", "DELETE"]))
+    routes.append(Route("/accounts/{account_id}/policy", handle, methods=["GET", "PUT"]))
+    routes.append(Route("/accounts/{account_id}/policy/defaults", handle, methods=["POST"]))
+    routes.append(Route("/accounts/{account_id}/action/{action}", handle, methods=["POST"]))
+    routes.append(Route("/accounts/{account_id}/desktop/login", handle, methods=["POST"]))
+    routes.append(Route("/accounts/{account_id}/desktop/check-auth", handle, methods=["POST"]))
     routes.append(Route("/policy", handle, methods=["PUT", "GET"]))
     routes += [Route(path, handle, methods=["POST"]) for path in ("/policy/defaults", "/channel/{action}",
                "/calls/{value}/reconcile", "/desktop/{action}")]

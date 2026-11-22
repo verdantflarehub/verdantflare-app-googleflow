@@ -1463,4 +1463,15 @@ button.quiet:not(.g-icon-button)::after,
 .gf-policy-foot { display: flex; align-items: center; justify-content: space-between; gap: 12px; flex-wrap: wrap; margin-top: 24px; padding-top: 18px; border-top: 1px solid var(--line); }
 .gf-policy-foot small { font-size: 12.5px; color: var(--muted); }
 .card + .card { margin-top: 20px; }
+/* Google Flow v0.3.0 multi-account extensions */
+.gf-summary-bar { margin-bottom: 14px; }
+.gf-acct-head-line { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.gf-pill { display: inline-flex; align-items: center; padding: 2px 8px; border-radius: 999px; font-size: 11px; font-weight: 500; background: var(--subtle); color: var(--muted); border: 0.5px solid var(--line); }
+.gf-pill-proxy { background: var(--accent-soft); color: var(--accent); border-color: rgba(8, 126, 96, 0.28); }
+.gf-badge.neutral { background: var(--line); color: var(--muted); }
+.gf-mono-inline { font-family: ui-monospace, SFMono-Regular, Consolas, monospace; font-size: 11.5px; }
+.gf-inline-banner { margin-bottom: 12px; }
+.gf-filter-bar { margin-bottom: 12px; }
+.gf-filter-label { display: inline-flex; align-items: center; gap: 8px; font-size: 12.5px; color: var(--muted); }
+.gf-dialog-form { display: flex; flex-direction: column; gap: 14px; }
 @media (max-width: 760px) { .gf-form-grid { grid-template-columns: 1fr; } }
