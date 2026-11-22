@@ -13,7 +13,7 @@ const labels = {
   close_desktop:'直接关闭桌面', finish_desktop:'完成登录并关闭桌面',
   reopen_desktop:'重新打开窗口', add_account:'+ 新增账号'
 };
-let revision = 0, busy = false, lastViewerPath = '/apps/google-flow/desktop/';
+let revision = 0, busy = false, lastViewerPath = '/apps/google-flow/desktop/', desktopPopup = null, desktopPoll = null;
 let cachedAccounts = [], cachedProxies = [], activePolicyAccount = 'default', filterAccount = '';
 
 function parseRoute() {
@@ -79,7 +79,7 @@ function accountsView(data) {
   if (data.desktop?.viewer_path) lastViewerPath = data.desktop.viewer_path;
   const desktopOpen = Boolean(data.desktop?.open);
   const desktopBanner = desktopOpen ? (
-    '<div class="gf-banner" role="status"><div><strong>登录桌面运行中</strong> · 请在新窗口中完成目标账号的 Google Flow 登录。</div>' +
+    '<div class="gf-banner" role="status"><div><strong>登录桌面运行中</strong> · 登录完成后直接关闭浏览器登录标签页即可自动保存并同步余额。</div>' +
     '<div class="actions">' + button('reopen_desktop', labels.reopen_desktop) +
     button('finish_desktop', labels.finish_desktop, 'gf-primary') +
     button('close_desktop', labels.close_desktop) + '</div></div>'
@@ -246,6 +246,38 @@ async function mutate(method, path, body, okMsg) {
   }
 }
 
+function stopDesktopWatch() {
+  if (desktopPoll) { clearInterval(desktopPoll); desktopPoll = null; }
+  desktopPopup = null;
+}
+
+function watchDesktopPopup(win, accountId) {
+  stopDesktopWatch();
+  desktopPopup = win;
+  if (!win) return;
+  desktopPoll = setInterval(async () => {
+    try {
+      if (!desktopPopup || desktopPopup.closed) {
+        stopDesktopWatch();
+        notice.textContent = '检测到登录网页已关闭，正在自动关闭桌面并同步授权…';
+        try {
+          await request(sdk, 'POST', '/desktop/close', {});
+          if (accountId) {
+            await request(sdk, 'POST', '/accounts/' + encodeURIComponent(accountId) + '/action/refresh', {});
+          }
+          await refresh();
+          notice.textContent = '登录桌面已自动关闭并刷新账号状态';
+        } catch (err) {
+          notice.textContent = err.message;
+          await refresh();
+        }
+      }
+    } catch {
+      stopDesktopWatch();
+    }
+  }, 1000);
+}
+
 async function openAccountDesktop(accountId) {
   if (busy) return;
   busy = true;
@@ -255,9 +287,10 @@ async function openAccountDesktop(accountId) {
     const data = await request(sdk, 'POST', path, {});
     const vp = typeof data?.viewer_path === 'string' && /^\/[a-zA-Z0-9/_-]+$/.test(data.viewer_path) ? data.viewer_path : lastViewerPath;
     lastViewerPath = vp;
-    window.open(vp, '_blank', 'noopener');
+    const win = window.open(vp, '_blank');
+    watchDesktopPopup(win, accountId);
     await refresh();
-    notice.textContent = '登录桌面已开启并在新窗口打开';
+    notice.textContent = '登录桌面已在新标签页打开，登录完成后直接关闭该标签页即可自动生效';
   } catch (e) {
     notice.textContent = e.message;
   } finally {

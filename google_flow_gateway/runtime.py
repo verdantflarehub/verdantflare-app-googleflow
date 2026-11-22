@@ -76,6 +76,20 @@ async def run():
     stop = asyncio.Event()
     q = lease = publisher = slot_mgr = None
     desktop_account_id = DEFAULT_ACCOUNT_ID
+    desktop_opened_at = 0.0
+    desktop_seen_client = False
+    desktop_idle_ticks = 0
+
+    def _kasmvnc_has_client():
+        for path in ("/proc/net/tcp", "/proc/net/tcp6"):
+            try:
+                for line in Path(path).read_text().splitlines()[1:]:
+                    parts = line.split()
+                    if len(parts) >= 4 and parts[1].endswith(":BBDB") and parts[3] == "01":
+                        return True
+            except OSError:
+                pass
+        return False
     try:
         for port in (8000, 8001):
             sock = socket.socket()
@@ -90,7 +104,7 @@ async def run():
             await command(hook, "stop-and-wait-for-zero-gpu-processes")
 
         async def desktop(action, account_id=None):
-            nonlocal desktop_account_id
+            nonlocal desktop_account_id, desktop_opened_at, desktop_seen_client, desktop_idle_ticks
             if action == "turn":
                 if no_gpu:
                     raise Error("desktop_turn_disabled", 404)
@@ -118,9 +132,15 @@ async def run():
                     "GOOGLE_FLOW_LOGIN_PROXY": proxy,
                 }
                 desktop_account_id = aid
+                desktop_opened_at = time.monotonic()
+                desktop_seen_client = False
+                desktop_idle_ticks = 0
             prev_aid = desktop_account_id
             result = json.loads(await command(hook, action, extra_env=extra_env))
             if action == "close":
+                desktop_opened_at = 0.0
+                desktop_seen_client = False
+                desktop_idle_ticks = 0
                 try:
                     slot_mgr.client_for(prev_aid).trigger_account_refresh()
                 except Error:
@@ -197,11 +217,30 @@ async def run():
                         raise
                 await asyncio.sleep(15)
 
+        async def watch_desktop_idle():
+            nonlocal desktop_seen_client, desktop_idle_ticks
+            while not stop.is_set():
+                await asyncio.sleep(5)
+                if desktop_opened_at <= 0:
+                    continue
+                elapsed = time.monotonic() - desktop_opened_at
+                if _kasmvnc_has_client():
+                    desktop_seen_client = True
+                    desktop_idle_ticks = 0
+                elif (desktop_seen_client and elapsed >= 15) or elapsed >= 600:
+                    desktop_idle_ticks += 1
+                    if desktop_idle_ticks >= 2:
+                        try:
+                            await desktop("close")
+                        except Error:
+                            pass
+
         loop = asyncio.get_running_loop()
         for sig in (signal.SIGTERM, signal.SIGINT):
             loop.add_signal_handler(sig, stop.set)
         tasks.append(asyncio.create_task(lifecycle()))
         tasks.append(asyncio.create_task(work()))
+        tasks.append(asyncio.create_task(watch_desktop_idle()))
         if publisher:
             tasks.append(asyncio.create_task(publish()))
         await stop.wait()
