@@ -396,6 +396,55 @@ class MultiAccountTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(slot.client._account_cache["credits"], 999)
             await mgr.stop_all()
 
+    async def test_v1_account_and_dispatch_use_cached_account_without_blocking(self):
+        import time
+
+        class CachedFastClient(FakeAccountClient):
+            def __init__(self, *args, **kwargs):
+                super().__init__(*args, **kwargs)
+                self.live_calls = 0
+                self.cached_calls = 0
+                self.refresh_triggered = 0
+
+            async def account(self):
+                self.live_calls += 1
+                raise AssertionError("live blocking account() should not be called when cache is populated")
+
+            async def cached_account(self):
+                self.cached_calls += 1
+                return {"authorized": self.authorized, "credits": self.credits, "email": self.email, "updated_at": 1700000000}
+
+            def trigger_account_refresh(self):
+                self.refresh_triggered += 1
+
+        a2 = self.q.create_account({"label": "备用账号", "priority": 20}, "admin")["id"]
+        c1 = CachedFastClient("default", credits=100)
+        c2 = CachedFastClient(a2, credits=200)
+        self.clients["default"] = c1
+        self.clients[a2] = c2
+
+        t0 = time.monotonic()
+        r_acct = self.api.get("/v1/account", headers=self.api_headers)
+        self.assertEqual(r_acct.status_code, 200, r_acct.text)
+        self.assertLess(time.monotonic() - t0, 1.0)
+        body = r_acct.json()
+        self.assertTrue(body["authorized"])
+        self.assertEqual(body["credits"], 300)
+        self.assertEqual(c1.live_calls, 0)
+        self.assertEqual(c2.live_calls, 0)
+        self.assertEqual(c1.cached_calls, 1)
+        self.assertEqual(c2.cached_calls, 1)
+
+        r_call = self.api.post("/v1/calls", headers=self.api_headers, json={
+            "idempotency_key": "k-cached-fast-1", "model": "veo-lite", "capability": "video",
+            "parameters": {"prompt": "fast cached dispatch"},
+        })
+        self.assertEqual(r_call.status_code, 200, r_call.text)
+        self.assertTrue(r_call.json()["accepted"])
+        self.assertEqual(c1.live_calls, 0)
+        self.assertEqual(c2.live_calls, 0)
+        self.assertGreaterEqual(c1.refresh_triggered + c2.refresh_triggered, 1)
+
 
 if __name__ == "__main__":
     unittest.main()

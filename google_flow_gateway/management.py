@@ -1,3 +1,4 @@
+import asyncio
 import json
 import mimetypes
 import os
@@ -33,13 +34,14 @@ async def _account_snapshot(g, account_id, force_refresh=False):
 
 def management(g, token, station, assets=None, lease=None, desktop=None, proxies=None):
     async def _build_accounts_payload():
+        accounts_list = g.q.list_accounts()
+        snapshots = await asyncio.gather(*(_account_snapshot(g, acct["id"]) for acct in accounts_list))
         items = []
         total_credits = 0
         total_reserved = 0
         active_accounts = 0
-        for acct in g.q.list_accounts():
+        for acct, live in zip(accounts_list, snapshots):
             aid = acct["id"]
-            live = await _account_snapshot(g, aid)
             usage = g.q.usage(aid)
             if isinstance(live.get("credits"), int):
                 total_credits += live["credits"]

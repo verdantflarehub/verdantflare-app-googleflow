@@ -1,3 +1,4 @@
+import asyncio
 import hmac
 import json
 import re
@@ -218,16 +219,25 @@ class Gateway:
                     raise Error("channel_unavailable", 503)
                 raise Error("channel_paused", 409)
 
+            async def _fetch_balance(aid):
+                c = self.client_for(aid)
+                if hasattr(c, "cached_account"):
+                    info = await c.cached_account()
+                    if info.get("authorized") is not None:
+                        return aid, info
+                return aid, await c.account()
+
+            results = await asyncio.gather(*(_fetch_balance(aid) for aid in target_ids), return_exceptions=True)
             balances = {}
             unauthorized_ids = []
-            for aid in target_ids:
-                c = self.client_for(aid)
-                try:
-                    acct = await c.account()
-                except Error:
+            for aid, res in zip(target_ids, results):
+                if isinstance(res, Error):
                     if requested_acct:
-                        raise
+                        raise res
                     continue
+                if isinstance(res, BaseException):
+                    raise res
+                _, acct = res
                 if not acct.get("authorized"):
                     unauthorized_ids.append(aid)
                     with self.q.transaction():
@@ -270,6 +280,8 @@ class Gateway:
             if isinstance(media, str) and ID.fullmatch(media):
                 self.q.outcome(row["id"], True, media=media)
                 await self.collect(self.q.find("id", row["id"]), result)
+                if hasattr(slot_client, "trigger_account_refresh"):
+                    slot_client.trigger_account_refresh()
             else:
                 error = result.get("error", {})
                 error = error if isinstance(error, dict) else {}
@@ -380,16 +392,22 @@ def execution(g, token):
         owner = g.owner(request)
         path = request.url.path
         if path == "/v1/account":
+            accounts_list = g.q.list_accounts()
+
+            async def _read_acct(a):
+                try:
+                    c = g.client_for(a["id"])
+                    if hasattr(c, "cached_account"):
+                        return await c.cached_account()
+                    return await c.account()
+                except Error:
+                    return {"authorized": None, "credits": None}
+
+            infos = await asyncio.gather(*(_read_acct(a) for a in accounts_list))
             accts_summary = []
             total_credits = 0
             any_auth = False
-            for a in g.q.list_accounts():
-                info = {"authorized": None, "credits": None}
-                try:
-                    c = g.client_for(a["id"])
-                    info = await c.account()
-                except Error:
-                    pass
+            for a, info in zip(accounts_list, infos):
                 if a["enabled"] and a["status"] == "active" and info.get("authorized"):
                     any_auth = True
                     if isinstance(info.get("credits"), int):
