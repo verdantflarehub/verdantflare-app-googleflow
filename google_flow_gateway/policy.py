@@ -29,7 +29,11 @@ def validate_proxy_url(proxy_url, allowed_hosts=DEFAULT_ALLOWED_PROXY_HOSTS):
     cleaned = proxy_url.strip()
     if not cleaned:
         return ""
-    parsed = urlsplit(cleaned)
+    try:
+        parsed = urlsplit(cleaned)
+        port = parsed.port
+    except ValueError:
+        raise Error("invalid_field", field="proxy_url") from None
     if (
         parsed.scheme not in ("http", "https")
         or not parsed.hostname
@@ -38,14 +42,14 @@ def validate_proxy_url(proxy_url, allowed_hosts=DEFAULT_ALLOWED_PROXY_HOSTS):
         or parsed.query
         or parsed.fragment
         or parsed.path not in ("", "/")
-        or parsed.port is None
-        or not (1024 <= parsed.port <= 65535)
+        or port is None
+        or not (1024 <= port <= 65535)
     ):
         raise Error("invalid_field", field="proxy_url")
     allowed = {h.strip().lower() for h in allowed_hosts if h and h.strip()}
     if parsed.hostname.lower() not in allowed:
         raise Error("invalid_field", field="proxy_url")
-    return f"{parsed.scheme}://{parsed.hostname.lower()}:{parsed.port}"
+    return f"{parsed.scheme}://{parsed.hostname.lower()}:{port}"
 
 
 def validate(changes):

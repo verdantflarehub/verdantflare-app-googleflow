@@ -60,14 +60,20 @@ def handle(action):
                 raise RuntimeError("Xvfb display :99 unavailable")
             time.sleep(0.2)
     elif action in ("close", "stop-and-wait-for-zero-gpu-processes"):
-        change("flow-login", False)
-        change("openbox", False)
-        change("kasmvnc", False)
+        first_err = None
+        for prog in ("flow-login", "openbox", "kasmvnc"):
+            try:
+                change(prog, False)
+            except Exception as exc:
+                if first_err is None:
+                    first_err = exc
         if action != "close":
             for sig in ("TERM", "KILL"):
                 subprocess.run(["pkill", "-" + sig, "-u", str(os.getuid()), "-x", "chrome"], check=False)
                 time.sleep(0.3)
             return {"open": False}
+        if first_err is not None and running("kasmvnc"):
+            raise first_err
     elif action == "open":
         _write_login_env()
         change("flow-login", False)

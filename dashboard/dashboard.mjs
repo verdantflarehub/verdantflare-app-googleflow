@@ -13,7 +13,7 @@ const labels = {
   close_desktop:'直接关闭桌面', finish_desktop:'完成登录并关闭桌面',
   reopen_desktop:'重新打开窗口', add_account:'+ 新增账号'
 };
-let revision = 0, busy = false, lastViewerPath = '/apps/google-flow/desktop/', desktopPopup = null, desktopPoll = null;
+let revision = 0, busy = false, lastViewerPath = '/apps/google-flow/desktop/', desktopPopup = null, desktopPoll = null, desktopSessionId = null, desktopAccountId = null;
 let cachedAccounts = [], cachedProxies = [], activePolicyAccount = 'default', filterAccount = '';
 
 function parseRoute() {
@@ -251,31 +251,42 @@ function stopDesktopWatch() {
   desktopPopup = null;
 }
 
-function watchDesktopPopup(win, accountId) {
+function watchDesktopPopup(win, accountId, sessionId) {
   stopDesktopWatch();
   desktopPopup = win;
+  desktopAccountId = accountId || desktopAccountId;
+  if (sessionId != null) desktopSessionId = sessionId;
   if (!win) return;
+  const watchedSession = desktopSessionId;
+  const watchedAccount = desktopAccountId;
   desktopPoll = setInterval(async () => {
     try {
       if (!desktopPopup || desktopPopup.closed) {
         stopDesktopWatch();
+        if (busy) return;
+        busy = true;
         notice.textContent = '检测到登录网页已关闭，正在自动关闭桌面并同步授权…';
         try {
-          await request(sdk, 'POST', '/desktop/close', {});
-          if (accountId) {
-            await request(sdk, 'POST', '/accounts/' + encodeURIComponent(accountId) + '/action/refresh', {});
+          const closeBody = watchedSession != null ? {session_id: watchedSession} : {};
+          const closed = await request(sdk, 'POST', '/desktop/close', closeBody);
+          if (!closed?.stale_ignored && watchedAccount) {
+            const auth = await request(sdk, 'POST', '/accounts/' + encodeURIComponent(watchedAccount) + '/action/refresh', {});
+            await refresh();
+            notice.textContent = auth?.authorized ? '登录桌面已自动关闭，授权有效（余额：' + (auth.credits ?? '—') + '）' : '登录桌面已自动关闭，尚未检测到有效会话';
+          } else {
+            await refresh();
           }
-          await refresh();
-          notice.textContent = '登录桌面已自动关闭并刷新账号状态';
         } catch (err) {
           notice.textContent = err.message;
           await refresh();
+        } finally {
+          busy = false;
         }
       }
     } catch {
       stopDesktopWatch();
     }
-  }, 1000);
+  }, 400);
 }
 
 async function openAccountDesktop(accountId) {
@@ -287,10 +298,17 @@ async function openAccountDesktop(accountId) {
     const data = await request(sdk, 'POST', path, {});
     const vp = typeof data?.viewer_path === 'string' && /^\/[a-zA-Z0-9/_-]+$/.test(data.viewer_path) ? data.viewer_path : lastViewerPath;
     lastViewerPath = vp;
+    desktopSessionId = data?.session_id ?? null;
+    desktopAccountId = accountId || data?.account_id || 'default';
     const win = window.open(vp, '_blank');
-    watchDesktopPopup(win, accountId);
-    await refresh();
-    notice.textContent = '登录桌面已在新标签页打开，登录完成后直接关闭该标签页即可自动生效';
+    if (win) {
+      watchDesktopPopup(win, desktopAccountId, desktopSessionId);
+      await refresh();
+      notice.textContent = '登录桌面已在新标签页打开，登录完成后直接关闭该标签页即可自动生效';
+    } else {
+      await refresh();
+      notice.textContent = '浏览器拦截了登录弹窗，请允许弹窗或点击「重新打开窗口」';
+    }
   } catch (e) {
     notice.textContent = e.message;
   } finally {
@@ -371,7 +389,12 @@ $('dashboard').addEventListener('click', async e => {
   if (act === 'add_account') return openAccountDialog(null);
   if (act === 'edit_acct') return openAccountDialog(findAccount(aid));
   if (act === 'auth') return openAccountDesktop(aid);
-  if (act === 'reopen_desktop') { window.open(lastViewerPath, '_blank', 'noopener'); return; }
+  if (act === 'reopen_desktop') {
+    const win = window.open(lastViewerPath, '_blank');
+    if (win) watchDesktopPopup(win, desktopAccountId, desktopSessionId);
+    else notice.textContent = '浏览器拦截了登录弹窗，请允许本站点弹窗';
+    return;
+  }
   if (act === 'refresh') return refresh();
   if (act === 'refresh_balance') {
     notice.textContent = '正在实时刷新余额…';
@@ -381,17 +404,21 @@ $('dashboard').addEventListener('click', async e => {
   }
   if (act === 'finish_desktop') {
     if (busy) return;
+    stopDesktopWatch();
     busy = true;
     notice.textContent = '正在校验会话并关闭桌面…';
     try {
       await request(sdk, 'POST', '/desktop/close', {});
+      if (desktopAccountId) {
+        await request(sdk, 'POST', '/accounts/' + encodeURIComponent(desktopAccountId) + '/action/refresh', {});
+      }
       await refresh();
       notice.textContent = '已关闭登录桌面并刷新账号列表';
     } catch (err) { notice.textContent = err.message; }
     finally { busy = false; }
     return;
   }
-  if (act === 'close_desktop') return mutate('POST', '/desktop/close', {}, '登录桌面已关闭');
+  if (act === 'close_desktop') { stopDesktopWatch(); return mutate('POST', '/desktop/close', {}, '登录桌面已关闭'); }
   if (busy) return;
   const row = e.target.closest('tr');
   $('media-label').hidden = act !== 'bind';
@@ -435,7 +462,7 @@ if (sdk?.navigation?.subscribe) {
 if (sdk?.theme?.subscribe) subscriptions.push(sdk.theme.subscribe(theme => {
   document.documentElement.dataset.theme = theme;
 }));
-addEventListener('pagehide', () => { ++revision; for (const unsubscribe of subscriptions) unsubscribe(); }, {once:true});
+addEventListener('pagehide', () => { ++revision; stopDesktopWatch(); for (const unsubscribe of subscriptions) unsubscribe(); }, {once:true});
 host?.ready?.();
 host?.resize?.(document.documentElement.scrollHeight);
 refresh();

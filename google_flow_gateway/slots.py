@@ -77,15 +77,18 @@ class AccountSlotManager:
                 acct = accts.get(aid)
                 if acct is None or not acct["enabled"]:
                     await self._stop_slot_unlocked(aid)
-            # Start or restart enabled slots
+            # Start or restart enabled slots (isolate single-slot startup failures so healthy slots continue)
             for aid, acct in accts.items():
                 if not acct["enabled"]:
                     continue
                 slot = self.slots.get(aid)
                 if slot is None or not slot.alive or slot.port != acct["port"] or slot.proxy_url != acct["proxy_url"]:
-                    if slot is not None:
-                        await self._stop_slot_unlocked(aid)
-                    await self._start_slot_unlocked(acct)
+                    try:
+                        if slot is not None:
+                            await self._stop_slot_unlocked(aid)
+                        await self._start_slot_unlocked(acct)
+                    except Exception:
+                        pass
 
     async def restart_slot(self, account_id):
         async with self._lock:

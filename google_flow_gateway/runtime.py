@@ -32,16 +32,35 @@ class Listener(uvicorn.Server):
         yield
 
 
-async def command(program, *args, extra_env=None):
+async def command(program, *args, extra_env=None, timeout=25.0):
     run_env = os.environ.copy()
     if extra_env:
         run_env.update(extra_env)
     proc = await asyncio.create_subprocess_exec(program, *args, env=run_env, stdout=asyncio.subprocess.PIPE,
                                                 stderr=asyncio.subprocess.DEVNULL)
-    stdout, _ = await proc.communicate()
+    try:
+        stdout, _ = await asyncio.wait_for(proc.communicate(), timeout=timeout)
+    except asyncio.TimeoutError:
+        proc.kill()
+        await proc.wait()
+        raise Error("desktop_unavailable", 503) from None
     if proc.returncode:
         raise Error("desktop_unavailable", 503)
     return stdout.decode().strip()
+
+
+def kasmvnc_has_client(port=48083, proc_paths=("/proc/net/tcp", "/proc/net/tcp6")):
+    """Return True if any ESTABLISHED (state 01) TCP connection exists on local KasmVNC port."""
+    suffix = f":{int(port):04X}"
+    for path in proc_paths:
+        try:
+            for line in Path(path).read_text().splitlines()[1:]:
+                parts = line.split()
+                if len(parts) >= 4 and parts[1].upper().endswith(suffix) and parts[3] == "01":
+                    return True
+        except OSError:
+            pass
+    return False
 
 
 async def run():
@@ -75,21 +94,13 @@ async def run():
     sockets, servers, tasks = [], [], []
     stop = asyncio.Event()
     q = lease = publisher = slot_mgr = None
+    desktop_lock = asyncio.Lock()
     desktop_account_id = DEFAULT_ACCOUNT_ID
+    desktop_session_id = 0
     desktop_opened_at = 0.0
     desktop_seen_client = False
     desktop_idle_ticks = 0
-
-    def _kasmvnc_has_client():
-        for path in ("/proc/net/tcp", "/proc/net/tcp6"):
-            try:
-                for line in Path(path).read_text().splitlines()[1:]:
-                    parts = line.split()
-                    if len(parts) >= 4 and parts[1].endswith(":BBDB") and parts[3] == "01":
-                        return True
-            except OSError:
-                pass
-        return False
+    desktop_port = int(env.get("GOOGLE_FLOW_DESKTOP_PORT", "48083"))
     try:
         for port in (8000, 8001):
             sock = socket.socket()
@@ -103,8 +114,8 @@ async def run():
             await slot_mgr.stop_all()
             await command(hook, "stop-and-wait-for-zero-gpu-processes")
 
-        async def desktop(action, account_id=None):
-            nonlocal desktop_account_id, desktop_opened_at, desktop_seen_client, desktop_idle_ticks
+        async def desktop(action, account_id=None, session_id=None):
+            nonlocal desktop_account_id, desktop_session_id, desktop_opened_at, desktop_seen_client, desktop_idle_ticks
             if action == "turn":
                 if no_gpu:
                     raise Error("desktop_turn_disabled", 404)
@@ -115,41 +126,55 @@ async def run():
                     except (OSError, ValueError):
                         expires_at = 0
                     if expires_at - time.time() < 120:
-                        await command(hook, "open")
+                        async with desktop_lock:
+                            await command(hook, "open")
                 return credentials(env["GOOGLE_FLOW_TURN_URLS"].split(","), env["GOOGLE_FLOW_TURN_SECRET"])
             if action not in ("status", "open", "close", "login"):
                 raise Error("invalid_field", field="action")
-            extra_env = None
-            if action in ("open", "login"):
-                aid = account_id or DEFAULT_ACCOUNT_ID
-                acct = q.get_account(aid)
-                home_dir, _ = slot_mgr.dirs_for(aid)
-                home_dir.mkdir(parents=True, exist_ok=True)
-                proxy = slot_mgr.effective_proxy(acct["proxy_url"])
-                extra_env = {
-                    "GOOGLE_FLOW_LOGIN_ACCOUNT_ID": aid,
-                    "GOOGLE_FLOW_LOGIN_HOME": str(home_dir),
-                    "GOOGLE_FLOW_LOGIN_PROXY": proxy,
-                }
-                desktop_account_id = aid
-                desktop_opened_at = time.monotonic()
-                desktop_seen_client = False
-                desktop_idle_ticks = 0
-            prev_aid = desktop_account_id
-            result = json.loads(await command(hook, action, extra_env=extra_env))
-            if action == "close":
-                desktop_opened_at = 0.0
-                desktop_seen_client = False
-                desktop_idle_ticks = 0
-                try:
-                    slot_mgr.client_for(prev_aid).trigger_account_refresh()
-                except Error:
-                    pass
-            if result.get("open"):
-                result["account_id"] = desktop_account_id
-            else:
-                result["account_id"] = None
-            return result
+            async with desktop_lock:
+                if action == "close" and session_id is not None and session_id != desktop_session_id:
+                    return {
+                        "available": True, "open": desktop_opened_at > 0,
+                        "viewer_path": env.get("GOOGLE_FLOW_VIEWER_PATH", "/apps/google-flow/desktop/"),
+                        "account_id": desktop_account_id if desktop_opened_at > 0 else None,
+                        "session_id": desktop_session_id if desktop_opened_at > 0 else None,
+                        "stale_ignored": True,
+                    }
+                extra_env = None
+                prev_aid = desktop_account_id
+                if action in ("open", "login"):
+                    aid = account_id or DEFAULT_ACCOUNT_ID
+                    acct = q.get_account(aid)
+                    home_dir, _ = slot_mgr.dirs_for(aid)
+                    home_dir.mkdir(parents=True, exist_ok=True)
+                    proxy = slot_mgr.effective_proxy(acct["proxy_url"])
+                    extra_env = {
+                        "GOOGLE_FLOW_LOGIN_ACCOUNT_ID": aid,
+                        "GOOGLE_FLOW_LOGIN_HOME": str(home_dir),
+                        "GOOGLE_FLOW_LOGIN_PROXY": proxy,
+                    }
+                result = json.loads(await command(hook, action, extra_env=extra_env))
+                if action in ("open", "login") and result.get("open"):
+                    desktop_session_id += 1
+                    desktop_account_id = account_id or DEFAULT_ACCOUNT_ID
+                    desktop_opened_at = time.monotonic()
+                    desktop_seen_client = False
+                    desktop_idle_ticks = 0
+                elif action == "close":
+                    desktop_opened_at = 0.0
+                    desktop_seen_client = False
+                    desktop_idle_ticks = 0
+                    try:
+                        slot_mgr.client_for(prev_aid).trigger_account_refresh()
+                    except Error:
+                        pass
+                if result.get("open"):
+                    result["account_id"] = desktop_account_id
+                    result["session_id"] = desktop_session_id
+                else:
+                    result["account_id"] = None
+                    result["session_id"] = None
+                return result
 
         if not no_gpu:
             lease = Lease(q, scheduler, identity, gpu, settle,
@@ -221,19 +246,22 @@ async def run():
             nonlocal desktop_seen_client, desktop_idle_ticks
             while not stop.is_set():
                 await asyncio.sleep(5)
-                if desktop_opened_at <= 0:
-                    continue
-                elapsed = time.monotonic() - desktop_opened_at
-                if _kasmvnc_has_client():
-                    desktop_seen_client = True
-                    desktop_idle_ticks = 0
-                elif (desktop_seen_client and elapsed >= 15) or elapsed >= 600:
-                    desktop_idle_ticks += 1
-                    if desktop_idle_ticks >= 2:
-                        try:
-                            await desktop("close")
-                        except Error:
-                            pass
+                try:
+                    if desktop_opened_at <= 0:
+                        continue
+                    elapsed = time.monotonic() - desktop_opened_at
+                    if elapsed >= 600:
+                        await desktop("close", session_id=desktop_session_id)
+                        continue
+                    if kasmvnc_has_client(desktop_port):
+                        desktop_seen_client = True
+                        desktop_idle_ticks = 0
+                    elif desktop_seen_client and elapsed >= 10:
+                        desktop_idle_ticks += 1
+                        if desktop_idle_ticks >= 2:
+                            await desktop("close", session_id=desktop_session_id)
+                except Exception:
+                    pass
 
         loop = asyncio.get_running_loop()
         for sig in (signal.SIGTERM, signal.SIGINT):

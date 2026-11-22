@@ -255,7 +255,15 @@ def management(g, token, station, assets=None, lease=None, desktop=None, proxies
             raise Error("desktop_unavailable", 503)
         if action in ("open", "turn", "login") and lease is not None and not lease.valid:
             raise Error("gpu_lease_lost", 409)
-        result = await desktop(action)
+        session_id = None
+        if action == "close" and request.method == "POST":
+            try:
+                close_body = await object_body(request)
+                if isinstance(close_body.get("session_id"), int):
+                    session_id = close_body["session_id"]
+            except Error:
+                pass
+        result = await desktop(action, session_id=session_id) if action == "close" else await desktop(action)
         if request.method != "GET":
             with q.transaction():
                 q.audit(actor, "desktop_" + action, {"account_id": DEFAULT_ACCOUNT_ID})
