@@ -44,6 +44,13 @@ class FakeAccountClient:
         self.calls.append((name, arguments))
         if self.mode == "unusual_activity":
             return {"error": {"code": "unusual_activity", "detail": "PUBLIC_ERROR_UNUSUAL_ACTIVITY", "accepted": False, "charged": "no"}}
+        if self.mode == "upload_terms":
+            return {"error": {
+                "type": "https://gflow-cli.dev/errors/media-upload-rejected",
+                "title": "Flow rejected a media upload",
+                "detail": "migrated host: a dialog opened after the file was chosen — most likely Flow's one-time upload-terms confirmation",
+                "charged": "no",
+            }}
         if self.mode == "authorization_required":
             raise Error("authorization_required", 401)
         if name == "gflow_generate_video":
@@ -302,6 +309,92 @@ class MultiAccountTests(unittest.IsolatedAsyncioTestCase):
         tcp4.write_text(header)
         tcp6.write_text(header + "   0: 00000000000000000000000000000001:BBD3 00000000000000000000000000000001:C350 01 00:00\n")
         self.assertTrue(kasmvnc_has_client(48083, (tcp4, tcp6)))
+
+    async def test_account_snapshot_persists_across_restart(self):
+        import asyncio
+        from google_flow_gateway.gflow_client import GFlow
+
+        # Save snapshot into SQLite
+        snap = {"authorized": True, "credits": 25040, "email": "main@example.com", "tier": "ULTRA", "updated_at": 1700000000.0}
+        self.q.save_account_snapshot("default", snap)
+
+        # Simulate process restart: reopen Queue and instantiate GFlow with persisted snapshot + slow session
+        q2 = Queue(self.root / "state.db", lambda: self.now)
+        try:
+            loaded = q2.load_account_snapshot("default")
+            self.assertEqual(loaded["credits"], 25040)
+            self.assertEqual(loaded["email"], "main@example.com")
+
+            refresh_started = asyncio.Event()
+
+            class SlowGFlow(GFlow):
+                async def account(self):
+                    refresh_started.set()
+                    await asyncio.sleep(5)
+                    return snap
+
+            client = SlowGFlow(None, initial_snapshot=loaded, on_snapshot=lambda s: q2.save_account_snapshot("default", s))
+            # cached_account must return the persisted snapshot immediately instead of authorized=None
+            got = await client.cached_account(ttl=60.0, max_wait=0.05)
+            self.assertTrue(got["authorized"])
+            self.assertEqual(got["credits"], 25040)
+            self.assertEqual(got["email"], "main@example.com")
+            await asyncio.sleep(0)
+            self.assertTrue(refresh_started.is_set())
+            if client._account_refresh_task:
+                client._account_refresh_task.cancel()
+        finally:
+            q2.db.close()
+
+    async def test_upload_terms_required_pauses_only_faulty_account(self):
+        self.q.update_account("default", {"priority": 10}, "admin")
+        a2 = self.q.create_account({"label": "备用账号", "priority": 20}, "admin")["id"]
+        self.clients[a2] = FakeAccountClient(a2, credits=200)
+        self.clients["default"].mode = "upload_terms"
+
+        r1 = self.api.post("/v1/calls", headers=self.api_headers, json={
+            "idempotency_key": "k-upload-1", "model": "veo-lite", "capability": "video",
+            "parameters": {"prompt": "hello"},
+        })
+        self.assertEqual(r1.status_code, 200, r1.text)
+        self.assertEqual(r1.json()["state"], "failed")
+        self.assertEqual(r1.json()["reason_code"], "upload_terms_required")
+        self.assertEqual(self.q.status("default")["status"], "paused")
+        self.assertEqual(self.q.status("default")["reason"], "upload_terms_required")
+        self.assertEqual(self.q.status(a2)["status"], "active")
+
+        # Next auto-routed call skips paused default and succeeds on a2
+        r2 = self.api.post("/v1/calls", headers=self.api_headers, json={
+            "idempotency_key": "k-upload-2", "model": "veo-lite", "capability": "video",
+            "parameters": {"prompt": "world"},
+        })
+        self.assertEqual(r2.status_code, 200, r2.text)
+        self.assertTrue(r2.json()["accepted"])
+        self.assertEqual(r2.json()["account_id"], a2)
+
+    async def test_slot_injects_lease_wait_seconds_and_snapshot(self):
+        from unittest.mock import AsyncMock, patch
+        from google_flow_gateway.slots import AccountSlotManager
+
+        self.q.save_account_snapshot("default", {"authorized": True, "credits": 999, "email": "u@example.com", "updated_at": 1.0})
+        mgr = AccountSlotManager(self.q, {}, {}, self.root / "gflow", self.root / "out", self.root / "accts")
+        captured_env = {}
+
+        class DummyProc:
+            returncode = None
+            def terminate(self): self.returncode = 0
+            async def wait(self): return 0
+
+        async def fake_exec(*args, **kwargs):
+            captured_env.update(kwargs.get("env", {}))
+            return DummyProc()
+
+        with patch("asyncio.create_subprocess_exec", side_effect=fake_exec):
+            await mgr.sync_all()
+            self.assertEqual(captured_env.get("GFLOW_CLI_LEASE_WAIT_SECONDS"), "30")
+            slot = mgr.get_slot("default")
+            self.assertEqual(slot.client._account_cache["credits"], 999)
+            await mgr.stop_all()
 
 
 if __name__ == "__main__":

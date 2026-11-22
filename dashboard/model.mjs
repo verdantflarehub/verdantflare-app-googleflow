@@ -16,7 +16,8 @@ export const reasons = {
   authorization_required:'需要重新授权',
   credit_limit:'达到积分上限',
   submission_unknown:'提交结果不明',
-  gpu_lease_lost:'GPU 租约丢失'
+  gpu_lease_lost:'GPU 租约丢失',
+  upload_terms_required:'首次传图需手动确认弹窗'
 };
 export async function request(sdk, method, path, body) {
   if (!sdk) throw Error('请从 Studio 应用中心打开');

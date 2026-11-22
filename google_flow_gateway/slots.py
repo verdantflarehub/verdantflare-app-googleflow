@@ -150,6 +150,7 @@ class AccountSlotManager:
             GFLOW_CLI_TELEMETRY="0",
             GFLOW_CLI_UPDATE_CHECK="false",
             GFLOW_CLI_INCIDENT_CAPTURE="false",
+            GFLOW_CLI_LEASE_WAIT_SECONDS=str(self.base_env.get("GFLOW_CLI_LEASE_WAIT_SECONDS", "30")),
         )
         if proxy:
             process_env["GFLOW_CLI_BROWSER_PROXY"] = proxy
@@ -161,7 +162,12 @@ class AccountSlotManager:
             "gflow", "serve", "--host", "127.0.0.1", "--port", str(acct["port"]),
             env=process_env, stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.DEVNULL,
         )
-        client = GFlow(local_session(token, port=acct["port"]), self.prices)
+        client = GFlow(
+            local_session(token, port=acct["port"]),
+            self.prices,
+            initial_snapshot=self.q.load_account_snapshot(aid),
+            on_snapshot=lambda snap, _aid=aid: self.q.save_account_snapshot(_aid, snap),
+        )
         slot = AccountSlot(aid, acct["port"], home_dir, output_dir, acct["proxy_url"], client, proc)
         self.slots[aid] = slot
 

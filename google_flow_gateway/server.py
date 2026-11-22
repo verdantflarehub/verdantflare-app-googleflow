@@ -273,11 +273,32 @@ class Gateway:
             else:
                 error = result.get("error", {})
                 error = error if isinstance(error, dict) else {}
-                unusual = (str(error.get("code", "")).lower() == "unusual_activity"
-                           or "PUBLIC_ERROR_UNUSUAL_ACTIVITY" in str(error.get("detail", "")))
-                rejected = unusual or error.get("charged") == "no" or error.get("accepted") is False
-                self.q.outcome(row["id"], False if rejected else None,
-                               reason="unusual_activity" if unusual else "rejected" if rejected else "acceptance_unknown")
+                err_type = str(error.get("type", "")).lower()
+                err_code = str(error.get("code", "")).lower()
+                err_detail = str(error.get("detail", ""))
+                unusual = (err_code == "unusual_activity"
+                           or "PUBLIC_ERROR_UNUSUAL_ACTIVITY" in err_detail)
+                upload_terms = (
+                    "media-upload-rejected" in err_type
+                    or err_code == "media_upload_rejected"
+                    or "upload-terms" in err_detail.lower()
+                )
+                profile_locked = (
+                    "profile-locked" in err_type
+                    or err_code == "profile_locked"
+                )
+                rejected = unusual or upload_terms or profile_locked or error.get("charged") == "no" or error.get("accepted") is False
+                if unusual:
+                    reason = "unusual_activity"
+                elif upload_terms:
+                    reason = "upload_terms_required"
+                elif profile_locked:
+                    reason = "profile_locked"
+                elif rejected:
+                    reason = "rejected"
+                else:
+                    reason = "acceptance_unknown"
+                self.q.outcome(row["id"], False if rejected else None, reason=reason)
         finally:
             self._inflight.discard(row["id"])
 
