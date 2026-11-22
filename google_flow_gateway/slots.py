@@ -72,11 +72,14 @@ class AccountSlotManager:
         """Ensure every enabled account has a running gflow serve subprocess and stop disabled/removed ones."""
         async with self._lock:
             accts = {a["id"]: a for a in self.q.list_accounts()}
-            # Stop removed or disabled slots
+            # Stop removed or disabled slots (isolated per slot)
             for aid in list(self.slots):
                 acct = accts.get(aid)
                 if acct is None or not acct["enabled"]:
-                    await self._stop_slot_unlocked(aid)
+                    try:
+                        await self._stop_slot_unlocked(aid)
+                    except Exception:
+                        pass
             # Start or restart enabled slots (isolate single-slot startup failures so healthy slots continue)
             for aid, acct in accts.items():
                 if not acct["enabled"]:

@@ -72,8 +72,8 @@ def handle(action):
                 subprocess.run(["pkill", "-" + sig, "-u", str(os.getuid()), "-x", "chrome"], check=False)
                 time.sleep(0.3)
             return {"open": False}
-        if first_err is not None and running("kasmvnc"):
-            raise first_err
+        if first_err is not None or running("flow-login") or running("kasmvnc"):
+            raise first_err or RuntimeError("desktop processes failed to stop")
     elif action == "open":
         _write_login_env()
         change("flow-login", False)

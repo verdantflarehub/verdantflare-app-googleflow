@@ -150,22 +150,6 @@ class MultiAccountTests(unittest.IsolatedAsyncioTestCase):
             with self.assertRaises(Error):
                 validate_proxy_url(bad)
 
-    def test_kasmvnc_has_client_hex_port_48083_ipv4_ipv6(self):
-        # 48083 == 0xBBD3; listening socket (0A) and wrong port 48091 (BBDB) must NOT match
-        tcp4 = self.root / "tcp"
-        tcp6 = self.root / "tcp6"
-        header = "  sl  local_address rem_address   st tx_queue rx_queue\n"
-        tcp4.write_text(header + "   0: 00000000:BBD3 00000000:0000 0A 00:00\n   1: 0100007F:BBDB 0100007F:1234 01 00:00\n")
-        tcp6.write_text(header)
-        self.assertFalse(kasmvnc_has_client(48083, (tcp4, tcp6)))
-        # IPv4 ESTABLISHED (01) on 48083 (BBD3) matches
-        tcp4.write_text(header + "   0: 00000000:BBD3 00000000:0000 0A 00:00\n   1: 2600020A:BBD3 0100020A:C350 01 00:00\n")
-        self.assertTrue(kasmvnc_has_client(48083, (tcp4, tcp6)))
-        # IPv6 ESTABLISHED (01) on 48083 (BBD3) matches
-        tcp4.write_text(header)
-        tcp6.write_text(header + "   0: 00000000000000000000000000000001:BBD3 00000000000000000000000000000001:C350 01 00:00\n")
-        self.assertTrue(kasmvnc_has_client(48083, (tcp4, tcp6)))
-
         # Create second account via management API
         r = self.mgmt.post("/accounts", headers=self.mgmt_headers, json={
             "label": "备用 Ultra", "priority": 2, "proxy_url": "http://openclash.openclash.svc.cluster.local:1083",
@@ -302,6 +286,22 @@ class MultiAccountTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(acct_agg["authorized"])
         self.assertEqual(acct_agg["credits"], 200)
         self.assertEqual(len(acct_agg["accounts"]), 2)
+
+    def test_kasmvnc_has_client_hex_port_48083_ipv4_ipv6(self):
+        # 48083 == 0xBBD3; listening socket (0A) and wrong port 48091 (BBDB) must NOT match
+        tcp4 = self.root / "tcp"
+        tcp6 = self.root / "tcp6"
+        header = "  sl  local_address rem_address   st tx_queue rx_queue\n"
+        tcp4.write_text(header + "   0: 00000000:BBD3 00000000:0000 0A 00:00\n   1: 0100007F:BBDB 0100007F:1234 01 00:00\n")
+        tcp6.write_text(header)
+        self.assertFalse(kasmvnc_has_client(48083, (tcp4, tcp6)))
+        # IPv4 ESTABLISHED (01) on 48083 (BBD3) matches
+        tcp4.write_text(header + "   0: 00000000:BBD3 00000000:0000 0A 00:00\n   1: 2600020A:BBD3 0100020A:C350 01 00:00\n")
+        self.assertTrue(kasmvnc_has_client(48083, (tcp4, tcp6)))
+        # IPv6 ESTABLISHED (01) on 48083 (BBD3) matches
+        tcp4.write_text(header)
+        tcp6.write_text(header + "   0: 00000000000000000000000000000001:BBD3 00000000000000000000000000000001:C350 01 00:00\n")
+        self.assertTrue(kasmvnc_has_client(48083, (tcp4, tcp6)))
 
 
 if __name__ == "__main__":

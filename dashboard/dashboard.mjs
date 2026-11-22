@@ -78,6 +78,13 @@ function accountCard(acct) {
 function accountsView(data) {
   if (data.desktop?.viewer_path) lastViewerPath = data.desktop.viewer_path;
   const desktopOpen = Boolean(data.desktop?.open);
+  if (desktopOpen) {
+    if (data.desktop?.session_id != null) desktopSessionId = data.desktop.session_id;
+    if (data.desktop?.account_id) desktopAccountId = data.desktop.account_id;
+  } else {
+    desktopSessionId = null;
+    desktopAccountId = null;
+  }
   const desktopBanner = desktopOpen ? (
     '<div class="gf-banner" role="status"><div><strong>登录桌面运行中</strong> · 登录完成后直接关闭浏览器登录标签页即可自动保存并同步余额。</div>' +
     '<div class="actions">' + button('reopen_desktop', labels.reopen_desktop) +
@@ -262,8 +269,8 @@ function watchDesktopPopup(win, accountId, sessionId) {
   desktopPoll = setInterval(async () => {
     try {
       if (!desktopPopup || desktopPopup.closed) {
-        stopDesktopWatch();
         if (busy) return;
+        stopDesktopWatch();
         busy = true;
         notice.textContent = '检测到登录网页已关闭，正在自动关闭桌面并同步授权…';
         try {
@@ -406,11 +413,13 @@ $('dashboard').addEventListener('click', async e => {
     if (busy) return;
     stopDesktopWatch();
     busy = true;
+    const closeBody = desktopSessionId != null ? {session_id: desktopSessionId} : {};
+    const targetAcct = desktopAccountId;
     notice.textContent = '正在校验会话并关闭桌面…';
     try {
-      await request(sdk, 'POST', '/desktop/close', {});
-      if (desktopAccountId) {
-        await request(sdk, 'POST', '/accounts/' + encodeURIComponent(desktopAccountId) + '/action/refresh', {});
+      const closed = await request(sdk, 'POST', '/desktop/close', closeBody);
+      if (!closed?.stale_ignored && targetAcct) {
+        await request(sdk, 'POST', '/accounts/' + encodeURIComponent(targetAcct) + '/action/refresh', {});
       }
       await refresh();
       notice.textContent = '已关闭登录桌面并刷新账号列表';
@@ -418,7 +427,12 @@ $('dashboard').addEventListener('click', async e => {
     finally { busy = false; }
     return;
   }
-  if (act === 'close_desktop') { stopDesktopWatch(); return mutate('POST', '/desktop/close', {}, '登录桌面已关闭'); }
+  if (act === 'close_desktop') {
+    if (busy) return;
+    stopDesktopWatch();
+    const closeBody = desktopSessionId != null ? {session_id: desktopSessionId} : {};
+    return mutate('POST', '/desktop/close', closeBody, '登录桌面已关闭');
+  }
   if (busy) return;
   const row = e.target.closest('tr');
   $('media-label').hidden = act !== 'bind';
