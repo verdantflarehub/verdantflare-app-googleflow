@@ -14,7 +14,7 @@ const labels = {
   reopen_desktop:'重新打开窗口', add_account:'+ 新增账号'
 };
 let revision = 0, busy = false, lastViewerPath = '/apps/google-flow/desktop/';
-let cachedAccounts = [], activePolicyAccount = 'default', filterAccount = '';
+let cachedAccounts = [], cachedProxies = [], activePolicyAccount = 'default', filterAccount = '';
 
 function parseRoute() {
   const parts = location.hash.replace(/^#\/apps\/google-flow\/?/, '').split('/').filter(Boolean);
@@ -32,10 +32,11 @@ function fmtUpdated(ts) {
   return new Date(ts * 1000).toLocaleString();
 }
 
-function proxyTag(proxyUrl) {
-  if (!proxyUrl) return '<span class="gf-pill">默认出口 :1082</span>';
-  const m = proxyUrl.match(/:(\d+)$/);
-  return '<span class="gf-pill gf-pill-proxy" title="' + escape(proxyUrl) + '">独立代理 ' + escape(m ? ':' + m[1] : proxyUrl) + '</span>';
+function proxyTag(acct) {
+  if (!acct.proxy_url) return '<span class="gf-pill">默认出口 :1082</span>';
+  if (acct.proxy_name) return '<span class="gf-pill gf-pill-proxy" title="' + escape(acct.proxy_url) + '">代理 · ' + escape(acct.proxy_name) + '</span>';
+  const m = acct.proxy_url.match(/:(\d+)$/);
+  return '<span class="gf-pill gf-pill-proxy" title="' + escape(acct.proxy_url) + '">独立代理 ' + escape(m ? ':' + m[1] : acct.proxy_url) + '</span>';
 }
 
 function accountCard(acct) {
@@ -57,7 +58,7 @@ function accountCard(acct) {
   return '<section class="card gf-acct-card" data-account-card="' + escape(aid) + '">' + pauseRow +
     '<div class="section-head"><div class="gf-acct-title"><div><div class="gf-acct-head-line"><h2>' + escape(acct.label) + '</h2>' +
     '<span class="gf-badge ' + badgeCls + '">' + escape(authText) + '</span>' +
-    '<span class="gf-pill">优先级 P' + escape(acct.priority) + '</span>' + proxyTag(acct.proxy_url) +
+    '<span class="gf-pill">优先级 P' + escape(acct.priority) + '</span>' + proxyTag(acct) +
     '</div><p class="subline">' + escape(email) + ' · ID: <span class="gf-mono-inline">' + escape(aid) + '</span> · 端口 ' + escape(acct.port) + '</p></div></div>' +
     '<div class="actions">' +
     button('refresh_balance', labels.refresh_balance, '', attr) +
@@ -264,15 +265,34 @@ async function openAccountDesktop(accountId) {
   }
 }
 
-function openAccountDialog(acct) {
+async function openAccountDialog(acct) {
   const isEdit = Boolean(acct);
   $('acct-dialog-title').textContent = isEdit ? '编辑账号 · ' + acct.label : '新增 Google Flow 账号';
   $('acct-id').value = isEdit ? acct.id : '';
   $('acct-label').value = isEdit ? acct.label : '';
   $('acct-priority').value = isEdit ? acct.priority : 100;
-  $('acct-proxy').value = isEdit ? (acct.proxy_url || '') : '';
   $('acct-enabled-wrap').hidden = !isEdit;
   $('acct-enabled').checked = isEdit ? Boolean(acct.enabled) : true;
+  try {
+    const res = await get('/proxies');
+    cachedProxies = Array.isArray(res?.items) ? res.items : [];
+  } catch { cachedProxies = []; }
+  const currentVal = (isEdit && acct.proxy_id) ? (acct.proxy_id + ':' + acct.proxy_revision) : 'default';
+  let found = currentVal === 'default';
+  const opts = ['<option value="default"' + (currentVal === 'default' ? ' selected' : '') + '>默认出口（系统默认 :1082）</option>'];
+  for (const p of cachedProxies) {
+    const val = p.proxy_id + ':' + p.revision;
+    const chosen = val === currentVal;
+    const expired = p.expires_at && Date.parse(p.expires_at) <= Date.now();
+    const unavail = p.status !== 'active' || expired;
+    if (chosen) found = true;
+    opts.push('<option value="' + escape(val) + '"' + (chosen ? ' selected' : '') + (unavail && !chosen ? ' disabled' : '') + '>' +
+      escape(p.name) + '（' + escape(p.protocol) + (unavail ? ' · 暂不可用' : '') + '）</option>');
+  }
+  if (!found && isEdit && acct.proxy_id) {
+    opts.push('<option value="' + escape(currentVal) + '" selected>' + escape(acct.proxy_name || '当前代理') + '（已变更）</option>');
+  }
+  $('acct-proxy').innerHTML = opts.join('');
   $('acct-dialog').showModal();
 }
 
@@ -281,10 +301,16 @@ $('acct-cancel').addEventListener('click', () => $('acct-dialog').close());
 $('acct-form').addEventListener('submit', async e => {
   e.preventDefault();
   const id = $('acct-id').value.trim();
+  const rawProxy = $('acct-proxy').value;
+  let proxy_ref = {mode: 'default'};
+  if (rawProxy && rawProxy !== 'default') {
+    const [proxy_id, rev] = rawProxy.split(':');
+    proxy_ref = {mode: 'proxy', proxy_id, revision: Number(rev)};
+  }
   const payload = {
     label: $('acct-label').value.trim(),
     priority: Number($('acct-priority').value),
-    proxy_url: $('acct-proxy').value.trim(),
+    proxy_ref,
   };
   if (id) payload.enabled = $('acct-enabled').checked;
   $('acct-dialog').close();

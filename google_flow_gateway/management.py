@@ -31,7 +31,7 @@ async def _account_snapshot(g, account_id, force_refresh=False):
         return {"authorized": None, "credits": None}
 
 
-def management(g, token, station, assets=None, lease=None, desktop=None):
+def management(g, token, station, assets=None, lease=None, desktop=None, proxies=None):
     async def _build_accounts_payload():
         items = []
         total_credits = 0
@@ -78,10 +78,28 @@ def management(g, token, station, assets=None, lease=None, desktop=None):
             raise Error("forbidden", 403)
         q = g.q
 
+        # --- System network proxies endpoint ---
+        if path == "/proxies":
+            if not proxies:
+                return reply({"schema_version": 1, "items": [], "configured": False})
+            res = proxies.list(g.org)
+            return reply(res | {"configured": True})
+
         # --- Multi-account management endpoints ---
         if path == "/accounts":
             if request.method == "POST":
-                acct = q.create_account(await object_body(request), actor)
+                body_data = await object_body(request)
+                if "proxy_ref" in body_data:
+                    if not proxies:
+                        raise Error("proxy_unavailable", 502)
+                    resolved_url, resolved_name = proxies.resolve_url(g.org, body_data["proxy_ref"])
+                    body_data = dict(body_data)
+                    body_data["proxy_url"] = resolved_url
+                    body_data["proxy_name"] = resolved_name
+                    ref = body_data["proxy_ref"] or {}
+                    body_data["proxy_id"] = ref.get("proxy_id", "") if ref.get("mode") == "proxy" else ""
+                    body_data["proxy_revision"] = int(ref.get("revision", 0)) if ref.get("mode") == "proxy" else 0
+                acct = q.create_account(body_data, actor)
                 if g.slots is not None and not isinstance(g.slots, dict):
                     await g.slots.sync_all()
                 return reply(acct, status=201)
@@ -91,7 +109,18 @@ def management(g, token, station, assets=None, lease=None, desktop=None):
             aid = request.path_params["account_id"]
             if path == f"/accounts/{aid}":
                 if request.method == "PUT":
-                    acct, proxy_changed = q.update_account(aid, await object_body(request), actor)
+                    body_data = await object_body(request)
+                    if "proxy_ref" in body_data:
+                        if not proxies:
+                            raise Error("proxy_unavailable", 502)
+                        resolved_url, resolved_name = proxies.resolve_url(g.org, body_data["proxy_ref"])
+                        body_data = dict(body_data)
+                        body_data["proxy_url"] = resolved_url
+                        body_data["proxy_name"] = resolved_name
+                        ref = body_data["proxy_ref"] or {}
+                        body_data["proxy_id"] = ref.get("proxy_id", "") if ref.get("mode") == "proxy" else ""
+                        body_data["proxy_revision"] = int(ref.get("revision", 0)) if ref.get("mode") == "proxy" else 0
+                    acct, proxy_changed = q.update_account(aid, body_data, actor)
                     if g.slots is not None and not isinstance(g.slots, dict):
                         if proxy_changed:
                             await g.slots.restart_slot(aid)
@@ -232,7 +261,7 @@ def management(g, token, station, assets=None, lease=None, desktop=None):
                 q.audit(actor, "desktop_" + action, {"account_id": DEFAULT_ACCOUNT_ID})
         return reply(result)
 
-    routes = [Route(path, handle) for path in ("/overview", "/calls", "/audit", "/desktop",
+    routes = [Route(path, handle) for path in ("/overview", "/proxies", "/calls", "/audit", "/desktop",
               "/desktop/settings", "/desktop/assets/{asset:path}",
               "/internal/dashboard-declaration", "/internal/dashboard-index", "/internal/dashboard/{asset:path}")]
     routes.append(Route("/accounts", handle, methods=["GET", "POST"]))

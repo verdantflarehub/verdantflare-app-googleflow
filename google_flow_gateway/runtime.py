@@ -17,6 +17,7 @@ from .discovery_store import Store
 from .gpu_lease import Lease
 from .management import management
 from .media import Media
+from .network_proxies import NetworkProxies
 from .policy import Error
 from .queue import DEFAULT_ACCOUNT_ID, Queue
 from .scheduler import Scheduler
@@ -135,7 +136,10 @@ async def run():
                           int(env.get("GOOGLE_FLOW_LEASE_RECONCILE_TIMEOUT_MINUTES", "30")))
         g = Gateway(q, None, Media(state / "cache"), default_output, org, slots=slot_mgr)
         g.admitted = lambda: (True if no_gpu else lease.valid) and slot_mgr.any_alive()
-        apps = [execution(g, execution_token), management(g, management_token, station, assets, lease, desktop)]
+        net_url = env.get("GOOGLE_FLOW_NETWORK_URL", "").strip()
+        net_tok = env.get("GOOGLE_FLOW_NETWORK_TOKEN", "").strip()
+        proxies = NetworkProxies(net_url, net_tok) if (net_url and len(net_tok) >= 32) else None
+        apps = [execution(g, execution_token), management(g, management_token, station, assets, lease, desktop, proxies)]
         for app, sock in zip(apps, sockets):
             server = Listener(uvicorn.Config(app, access_log=False, log_level="warning"))
             servers.append(server)

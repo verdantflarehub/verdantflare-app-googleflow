@@ -73,6 +73,13 @@ class Queue:
             cols = {row[1] for row in self.db.execute("PRAGMA table_info(calls)").fetchall()}
             if "account_id" not in cols:
                 self.db.execute("ALTER TABLE calls ADD COLUMN account_id TEXT NOT NULL DEFAULT 'default'")
+            acols = {row[1] for row in self.db.execute("PRAGMA table_info(accounts)").fetchall()}
+            if "proxy_name" not in acols:
+                self.db.execute("ALTER TABLE accounts ADD COLUMN proxy_name TEXT NOT NULL DEFAULT ''")
+            if "proxy_id" not in acols:
+                self.db.execute("ALTER TABLE accounts ADD COLUMN proxy_id TEXT NOT NULL DEFAULT ''")
+            if "proxy_revision" not in acols:
+                self.db.execute("ALTER TABLE accounts ADD COLUMN proxy_revision INTEGER NOT NULL DEFAULT 0")
             for key, value in {"policy": DEFAULTS, "pause": {}, "epoch": 0}.items():
                 self.db.execute("INSERT OR IGNORE INTO settings VALUES (?,?)", (key, encode(value)))
             # Smoothly migrate single-account settings into default account row
@@ -148,6 +155,9 @@ class Queue:
             "enabled": bool(row["enabled"]),
             "priority": int(row["priority"]),
             "proxy_url": row["proxy_url"] or "",
+            "proxy_name": row["proxy_name"] if "proxy_name" in row.keys() else "",
+            "proxy_id": row["proxy_id"] if "proxy_id" in row.keys() else "",
+            "proxy_revision": int(row["proxy_revision"]) if "proxy_revision" in row.keys() else 0,
             "port": int(row["port"]),
             "policy": json.loads(row["policy_json"]),
             "pause": pause,
@@ -168,6 +178,9 @@ class Queue:
         if type(priority) is not int or not (1 <= priority <= 999):
             raise Error("invalid_field", field="priority")
         proxy_url = validate_proxy_url(data.get("proxy_url", ""), self.allowed_proxy_hosts)
+        proxy_name = str(data.get("proxy_name") or "").strip()[:64]
+        proxy_id = str(data.get("proxy_id") or "").strip()[:64]
+        proxy_revision = int(data.get("proxy_revision") or 0)
         enabled = 1 if data.get("enabled", True) else 0
         with self.transaction():
             existing = self.db.execute("SELECT port FROM accounts").fetchall()
@@ -180,12 +193,12 @@ class Queue:
             account_id = "acct_" + uuid4().hex[:8]
             now = self.clock()
             self.db.execute(
-                """INSERT INTO accounts(id,label,enabled,priority,proxy_url,port,policy_json,pause_json,epoch,created_at,updated_at)
-                   VALUES(?,?,?,?,?,?,?,?,0,?,?)""",
-                (account_id, label, enabled, priority, proxy_url, port, encode(DEFAULTS), "{}", now, now),
+                """INSERT INTO accounts(id,label,enabled,priority,proxy_url,proxy_name,proxy_id,proxy_revision,port,policy_json,pause_json,epoch,created_at,updated_at)
+                   VALUES(?,?,?,?,?,?,?,?,?,?,?,0,?,?)""",
+                (account_id, label, enabled, priority, proxy_url, proxy_name, proxy_id, proxy_revision, port, encode(DEFAULTS), "{}", now, now),
             )
             self.audit(actor, "account_create", {"account_id": account_id, "label": label, "priority": priority,
-                                                 "proxy_url": proxy_url, "port": port})
+                                                 "proxy_url": proxy_url, "proxy_name": proxy_name, "port": port})
             return self.get_account(account_id)
 
     def update_account(self, account_id, data, actor):
@@ -197,6 +210,9 @@ class Queue:
             enabled = int(row["enabled"])
             priority = int(row["priority"])
             proxy_url = row["proxy_url"] or ""
+            proxy_name = row["proxy_name"] if "proxy_name" in row.keys() else ""
+            proxy_id = row["proxy_id"] if "proxy_id" in row.keys() else ""
+            proxy_revision = int(row["proxy_revision"]) if "proxy_revision" in row.keys() else 0
             proxy_changed = False
             if "label" in data:
                 if not isinstance(data["label"], str) or not 1 <= len(data["label"].strip()) <= 64:
@@ -221,13 +237,19 @@ class Queue:
                         raise Error("account_busy", 409)
                     proxy_url = new_proxy
                     proxy_changed = True
+                if "proxy_name" in data:
+                    proxy_name = str(data.get("proxy_name") or "").strip()[:64]
+                if "proxy_id" in data:
+                    proxy_id = str(data.get("proxy_id") or "").strip()[:64]
+                if "proxy_revision" in data:
+                    proxy_revision = int(data.get("proxy_revision") or 0)
             self.db.execute(
-                "UPDATE accounts SET label=?, enabled=?, priority=?, proxy_url=?, updated_at=? WHERE id=?",
-                (label, enabled, priority, proxy_url, self.clock(), account_id),
+                "UPDATE accounts SET label=?, enabled=?, priority=?, proxy_url=?, proxy_name=?, proxy_id=?, proxy_revision=?, updated_at=? WHERE id=?",
+                (label, enabled, priority, proxy_url, proxy_name, proxy_id, proxy_revision, self.clock(), account_id),
             )
             self.audit(actor, "account_update", {
                 "account_id": account_id, "label": label, "enabled": bool(enabled),
-                "priority": priority, "proxy_url": proxy_url, "proxy_changed": proxy_changed,
+                "priority": priority, "proxy_url": proxy_url, "proxy_name": proxy_name, "proxy_changed": proxy_changed,
             })
             return self.get_account(account_id), proxy_changed
 

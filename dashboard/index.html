@@ -12,7 +12,7 @@
 <input type="hidden" name="id" id="acct-id">
 <label class="gf-field"><span class="gf-field-label">账号名称</span><input required name="label" id="acct-label" maxlength="64" placeholder="例如：备用 Ultra 账号"></label>
 <label class="gf-field"><span class="gf-field-label">调度优先级<span class="gf-field-unit">1–999，越小越优先</span></span><input required type="number" min="1" max="999" step="1" name="priority" id="acct-priority" value="100"></label>
-<label class="gf-field"><span class="gf-field-label">独立代理出口<span class="gf-field-unit">选填</span></span><input name="proxy_url" id="acct-proxy" placeholder="留空走默认 :1082，如 http://openclash.openclash.svc.cluster.local:1083"><small>须为白名单内的 http(s) 代理地址；修改运行中账号的代理需等待其任务完成。</small></label>
+<label class="gf-field"><span class="gf-field-label">代理出口<span class="gf-field-unit">读取系统「网络出口」</span></span><select name="proxy_ref" id="acct-proxy"><option value="default">默认出口（系统默认 :1082）</option></select><small>从系统「网络出口」选择该账号专用代理；修改运行中账号的代理需等待其任务完成。</small></label>
 <label class="c-check" id="acct-enabled-wrap" hidden><input type="checkbox" name="enabled" id="acct-enabled" checked> 启用该账号参与自动调度</label>
 <div class="actions g-space"><button type="button" id="acct-cancel">取消</button><button type="submit" class="gf-primary">保存</button></div></form></dialog>
 </main>
