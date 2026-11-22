@@ -42,8 +42,8 @@ python -m google_flow_gateway.runtime
 
 - [开发指南](../docs/design/app/google-flow/details/google-flow.development-guide.md)
 - [技术白皮书](../docs/design/app/google-flow/details/google-flow.technical-whitepaper.md)
-- [锁卷验收 S1](../docs/acceptance/accept_20261117_google-flow-mcp.md)
-- [T3.2 执行记录](../docs/changes/change_20261119_build-google-flow-gateway.md)
+- [锁卷验收 S1](../docs/archive/acceptance/accept_20261117_google-flow-mcp.md)
+- [T3.2 执行记录](../docs/archive/changes/change_20261119_build-google-flow-gateway.md)
 
 ## 6. 镜像构建与发布
 
