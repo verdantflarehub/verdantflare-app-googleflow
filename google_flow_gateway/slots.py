@@ -121,6 +121,15 @@ class AccountSlotManager:
         home_dir, output_dir = self.dirs_for(aid)
         home_dir.mkdir(parents=True, exist_ok=True)
         output_dir.mkdir(parents=True, exist_ok=True)
+        if aid != DEFAULT_ACCOUNT_ID:
+            cfg = home_dir / "config.toml"
+            if not cfg.exists():
+                cfg.write_text('default_profile = "default"\n', encoding="utf-8")
+            prof = home_dir / "profile_default"
+            prof.mkdir(parents=True, exist_ok=True)
+            marker = prof / ".gflow_browser_strategy"
+            if not marker.exists():
+                marker.write_text("chrome", encoding="utf-8")
         token = secrets.token_urlsafe(48)
         allowed = {"PATH", "HOME", "DO_NOT_TRACK", "LANG", "LC_ALL", "DISPLAY", "WAYLAND_DISPLAY",
                    "DBUS_SESSION_BUS_ADDRESS", "HTTPS_PROXY", "HTTP_PROXY", "NO_PROXY"}
