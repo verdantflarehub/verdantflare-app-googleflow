@@ -19,13 +19,26 @@ UNAUTHENTICATED_STATUSES = {"unauthenticated", "not_authenticated", "expired", "
 
 
 class GFlow:
-    def __init__(self, session, prices=None):
+    def __init__(self, session, prices=None, initial_snapshot=None, on_snapshot=None):
         self.session = session
         self.prices = prices or {}
         self._account_lock = asyncio.Lock()
-        self._account_cache = None
+        self._on_snapshot = on_snapshot
+        if isinstance(initial_snapshot, dict) and initial_snapshot.get("authorized") is not None:
+            self._account_cache = dict(initial_snapshot)
+        else:
+            self._account_cache = None
+        # Keep cached_at at 0.0 so a persisted snapshot renders immediately on restart
+        # while triggering an asynchronous background refresh on first read.
         self._account_cached_at = 0.0
         self._account_refresh_task = None
+
+    def _persist_snapshot(self, value):
+        if self._on_snapshot is not None:
+            try:
+                self._on_snapshot(dict(value))
+            except Exception:
+                pass
 
     async def tool(self, name, **arguments):
         try:
@@ -50,6 +63,7 @@ class GFlow:
                 value = {"authorized": False, "credits": None, "email": auth.get("user_email"), "tier": None, "updated_at": time.time()}
                 self._account_cache = value
                 self._account_cached_at = time.monotonic()
+                self._persist_snapshot(value)
                 return dict(value)
             if status != "authenticated":
                 raise Error("channel_unavailable", 503)
@@ -66,6 +80,7 @@ class GFlow:
             }
             self._account_cache = value
             self._account_cached_at = time.monotonic()
+            self._persist_snapshot(value)
             return dict(value)
 
     async def generate_video_edit(self, *, prompt, video_path, reference_images, aspect, duration, output_dir):

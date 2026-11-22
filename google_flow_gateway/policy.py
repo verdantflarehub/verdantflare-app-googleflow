@@ -11,7 +11,15 @@ DEFAULTS = {
     "on_submission_unknown": "hold",
 }
 ACTIONS = {"on_unusual_activity": ("pause", "continue"), "on_submission_unknown": ("hold", "pause")}
-REASONS = {"manual", "unusual_activity", "authorization_required", "credit_limit", "submission_unknown", "gpu_lease_lost"}
+REASONS = {
+    "manual",
+    "unusual_activity",
+    "authorization_required",
+    "credit_limit",
+    "submission_unknown",
+    "gpu_lease_lost",
+    "upload_terms_required",
+}
 DEFAULT_ALLOWED_PROXY_HOSTS = ("openclash.openclash.svc.cluster.local",)
 
 

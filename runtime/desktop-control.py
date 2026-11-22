@@ -76,11 +76,19 @@ def handle(action):
             raise first_err or RuntimeError("desktop processes failed to stop")
     elif action == "open":
         _write_login_env()
-        change("flow-login", False)
-        change("kasmvnc", True)
-        wait_port(KASMVNC_PORT, timeout=10.0)
-        change("openbox", True)
-        change("flow-login", True)
+        try:
+            change("flow-login", False)
+            change("kasmvnc", True)
+            wait_port(KASMVNC_PORT, timeout=10.0)
+            change("openbox", True)
+            change("flow-login", True)
+        except Exception:
+            for prog in ("flow-login", "openbox", "kasmvnc"):
+                try:
+                    change(prog, False)
+                except Exception:
+                    pass
+            raise
     elif action == "login":
         if not running("kasmvnc"):
             raise RuntimeError("open desktop first")

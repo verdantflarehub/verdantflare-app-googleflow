@@ -80,6 +80,8 @@ class Queue:
                 self.db.execute("ALTER TABLE accounts ADD COLUMN proxy_id TEXT NOT NULL DEFAULT ''")
             if "proxy_revision" not in acols:
                 self.db.execute("ALTER TABLE accounts ADD COLUMN proxy_revision INTEGER NOT NULL DEFAULT 0")
+            if "snapshot_json" not in acols:
+                self.db.execute("ALTER TABLE accounts ADD COLUMN snapshot_json TEXT NOT NULL DEFAULT '{}'")
             for key, value in {"policy": DEFAULTS, "pause": {}, "epoch": 0}.items():
                 self.db.execute("INSERT OR IGNORE INTO settings VALUES (?,?)", (key, encode(value)))
             # Smoothly migrate single-account settings into default account row
@@ -144,6 +146,29 @@ class Queue:
 
     def get_account(self, account_id=DEFAULT_ACCOUNT_ID):
         return self._format_account(self._acct_row(account_id))
+
+    def load_account_snapshot(self, account_id=DEFAULT_ACCOUNT_ID):
+        with self.lock:
+            row = self.db.execute("SELECT snapshot_json FROM accounts WHERE id=?", (account_id,)).fetchone()
+            if not row:
+                return None
+            raw = row["snapshot_json"] or "{}"
+            try:
+                data = json.loads(raw)
+            except (TypeError, ValueError):
+                return None
+            if isinstance(data, dict) and data.get("authorized") is not None:
+                return data
+            return None
+
+    def save_account_snapshot(self, account_id, snapshot):
+        if not isinstance(snapshot, dict) or snapshot.get("authorized") is None:
+            return
+        with self.transaction():
+            self.db.execute(
+                "UPDATE accounts SET snapshot_json=? WHERE id=?",
+                (encode(snapshot), account_id),
+            )
 
     def _format_account(self, row):
         pause = json.loads(row["pause_json"] or "{}")
@@ -508,7 +533,7 @@ class Queue:
                     self.pause(state, call_id=call_id, account_id=aid)
             elif not accepted:
                 state = "failed"
-                if reason == "authorization_required" or (reason == "unusual_activity" and
+                if reason in ("authorization_required", "upload_terms_required") or (reason == "unusual_activity" and
                         policy["on_unusual_activity"] == "pause"):
                     self.pause(reason, call_id=call_id, account_id=aid)
             else:

@@ -113,7 +113,7 @@ class AccountSlotManager:
             shutil.rmtree(root, ignore_errors=True)
 
     async def _stop_slot_unlocked(self, account_id):
-        slot = self.slots.pop(account_id, None)
+        slot = self.slots.get(account_id)
         if slot and slot.alive:
             slot.process.terminate()
             try:
@@ -121,6 +121,7 @@ class AccountSlotManager:
             except asyncio.TimeoutError:
                 slot.process.kill()
                 await slot.process.wait()
+        self.slots.pop(account_id, None)
 
     async def _start_slot_unlocked(self, acct):
         aid = acct["id"]

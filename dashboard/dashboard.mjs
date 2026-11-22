@@ -418,11 +418,16 @@ $('dashboard').addEventListener('click', async e => {
     notice.textContent = '正在校验会话并关闭桌面…';
     try {
       const closed = await request(sdk, 'POST', '/desktop/close', closeBody);
-      if (!closed?.stale_ignored && targetAcct) {
-        await request(sdk, 'POST', '/accounts/' + encodeURIComponent(targetAcct) + '/action/refresh', {});
+      if (closed?.stale_ignored) {
+        await refresh();
+        notice.textContent = '桌面会话已变更，已刷新最新状态';
+      } else {
+        if (targetAcct) {
+          await request(sdk, 'POST', '/accounts/' + encodeURIComponent(targetAcct) + '/action/refresh', {});
+        }
+        await refresh();
+        notice.textContent = '已关闭登录桌面并刷新账号列表';
       }
-      await refresh();
-      notice.textContent = '已关闭登录桌面并刷新账号列表';
     } catch (err) { notice.textContent = err.message; }
     finally { busy = false; }
     return;
@@ -431,7 +436,9 @@ $('dashboard').addEventListener('click', async e => {
     if (busy) return;
     stopDesktopWatch();
     const closeBody = desktopSessionId != null ? {session_id: desktopSessionId} : {};
-    return mutate('POST', '/desktop/close', closeBody, '登录桌面已关闭');
+    const closed = await mutate('POST', '/desktop/close', closeBody, '');
+    if (closed) notice.textContent = closed.stale_ignored ? '桌面会话已变更，已刷新最新状态' : '登录桌面已关闭';
+    return;
   }
   if (busy) return;
   const row = e.target.closest('tr');

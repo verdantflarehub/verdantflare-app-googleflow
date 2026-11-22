@@ -153,7 +153,16 @@ async def run():
                         "GOOGLE_FLOW_LOGIN_HOME": str(home_dir),
                         "GOOGLE_FLOW_LOGIN_PROXY": proxy,
                     }
-                result = json.loads(await command(hook, action, extra_env=extra_env))
+                try:
+                    result = json.loads(await command(hook, action, extra_env=extra_env))
+                except Error:
+                    if action in ("open", "login") and desktop_opened_at <= 0:
+                        # Failsafe: track failed open so watch_desktop_idle still reaps any residual process
+                        desktop_session_id += 1
+                        desktop_opened_at = time.monotonic()
+                        desktop_seen_client = False
+                        desktop_idle_ticks = 0
+                    raise
                 if action in ("open", "login") and result.get("open"):
                     desktop_session_id += 1
                     desktop_account_id = account_id or DEFAULT_ACCOUNT_ID
