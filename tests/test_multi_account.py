@@ -470,6 +470,34 @@ class MultiAccountTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(cookie.exists() or cookie.is_symlink())
         self.assertFalse(sock.exists() or sock.is_symlink())
 
+    async def test_gflow_tool_serializes_with_background_account_refresh(self):
+        import asyncio
+        from google_flow_gateway.gflow_client import GFlow
+
+        events = []
+
+        class RaceProbeGFlow(GFlow):
+            async def _call_tool(self, name, **arguments):
+                events.append(("start", name))
+                await asyncio.sleep(0.05)
+                events.append(("end", name))
+                if name == "gflow_auth_status":
+                    return {"status": "authenticated", "user_email": "u@example.com"}
+                if name == "gflow_get_credits":
+                    return {"credits": 100}
+                return {"flow_media_id": "m-1"}
+
+        client = RaceProbeGFlow(None)
+        t_acct = asyncio.create_task(client.account())
+        await asyncio.sleep(0.01)
+        t_gen = asyncio.create_task(client.tool("gflow_generate_video", prompt="test"))
+        await asyncio.gather(t_acct, t_gen)
+
+        # gflow_generate_video must not start while gflow_auth_status/gflow_get_credits is holding Chrome profile
+        gen_start = events.index(("start", "gflow_generate_video"))
+        credits_end = events.index(("end", "gflow_get_credits"))
+        self.assertGreater(gen_start, credits_end)
+
 
 if __name__ == "__main__":
     unittest.main()

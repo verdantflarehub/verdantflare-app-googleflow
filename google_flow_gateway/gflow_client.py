@@ -40,7 +40,7 @@ class GFlow:
             except Exception:
                 pass
 
-    async def tool(self, name, **arguments):
+    async def _call_tool(self, name, **arguments):
         try:
             async with self.session() as session:
                 reply = await session.call_tool(name, arguments)
@@ -53,9 +53,17 @@ class GFlow:
         except Exception:
             raise Error("channel_unavailable", 503) from None
 
+    async def tool(self, name, **arguments):
+        # Serialize Chrome-profile-touching tools with account() on the same slot
+        # to prevent concurrent profile_locked collisions with background refresh.
+        if name in ("gflow_list_models", "gflow_list_tools"):
+            return await self._call_tool(name, **arguments)
+        async with self._account_lock:
+            return await self._call_tool(name, **arguments)
+
     async def account(self):
         async with self._account_lock:
-            auth = await self.tool("gflow_auth_status")
+            auth = await self._call_tool("gflow_auth_status")
             status = auth.get("status")
             if status in ("throttled", "error", "unavailable", "profile_locked"):
                 raise Error("channel_unavailable", 503)
@@ -67,7 +75,7 @@ class GFlow:
                 return dict(value)
             if status != "authenticated":
                 raise Error("channel_unavailable", 503)
-            result = await self.tool("gflow_get_credits")
+            result = await self._call_tool("gflow_get_credits")
             balance = result.get("credits")
             if type(balance) is not int or balance < 0:
                 raise Error("balance_unavailable", 503)
