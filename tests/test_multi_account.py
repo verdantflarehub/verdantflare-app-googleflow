@@ -498,6 +498,56 @@ class MultiAccountTests(unittest.IsolatedAsyncioTestCase):
         credits_end = events.index(("end", "gflow_get_credits"))
         self.assertGreater(gen_start, credits_end)
 
+    def test_media_validate_accepts_jpeg_bytes_with_png_declared_mime(self):
+        import io
+        from PIL import Image
+        from google_flow_gateway.media import Media
+
+        buf = io.BytesIO()
+        Image.new("RGB", (16, 16), color=(10, 20, 30)).save(buf, format="JPEG")
+        raw = buf.getvalue()
+        m = Media(self.root / "media_test")
+        meta = m.put(raw, "image/png")
+        self.assertEqual(meta["mime_type"], "image/jpeg")
+        self.assertEqual(meta["width"], 16)
+        self.assertEqual(meta["height"], 16)
+        path = m.path_with_ext(meta["sha256"])
+        self.assertEqual(path.suffix, ".jpg")
+
+    async def test_async_dispatch_returns_fast_and_completes_in_background(self):
+        import asyncio, time
+        from httpx import ASGITransport, AsyncClient
+
+        class SlowVideoClient(FakeAccountClient):
+            async def tool(self, name, **arguments):
+                if name == "gflow_generate_video":
+                    await asyncio.sleep(0.3)
+                    return {"flow_media_id": "m-async-1", "cost": 10}
+                return await super().tool(name, **arguments)
+
+        self.clients["default"] = SlowVideoClient("default", credits=100)
+        gw_async = Gateway(self.q, self.clients["default"], self.media, self.output, "org1", slots=self.clients, dispatch_wait_seconds=0.05)
+        app = execution(gw_async, self.token)
+        async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+            t0 = time.monotonic()
+            r = await client.post("/v1/jobs", headers=self.api_headers, json={
+                "request_id": "k-async-1", "model": "veo-lite", "capability": "video",
+                "parameters": {"prompt": "async dispatch test"},
+            })
+            elapsed = time.monotonic() - t0
+            self.assertEqual(r.status_code, 200, r.text)
+            self.assertLess(elapsed, 0.2)
+            # Still pending/dispatching immediately, accepted is None
+            self.assertIn(r.json()["state"], ("pending", "dispatching"))
+            self.assertIsNone(r.json()["accepted"])
+
+            # Wait for background task to complete and poll /v1/jobs/{request_id}
+            await asyncio.sleep(0.45)
+            r2 = await client.get("/v1/jobs/k-async-1", headers=self.api_headers)
+            self.assertEqual(r2.status_code, 200, r2.text)
+            self.assertTrue(r2.json()["accepted"])
+            self.assertEqual(r2.json()["state"], "running")
+
 
 if __name__ == "__main__":
     unittest.main()

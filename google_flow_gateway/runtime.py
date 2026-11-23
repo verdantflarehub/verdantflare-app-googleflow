@@ -188,7 +188,9 @@ async def run():
         if not no_gpu:
             lease = Lease(q, scheduler, identity, gpu, settle,
                           int(env.get("GOOGLE_FLOW_LEASE_RECONCILE_TIMEOUT_MINUTES", "30")))
-        g = Gateway(q, None, Media(state / "cache"), default_output, org, slots=slot_mgr)
+        dispatch_wait = float(env.get("GOOGLE_FLOW_DISPATCH_WAIT_SECONDS", "1.5"))
+        g = Gateway(q, None, Media(state / "cache"), default_output, org, slots=slot_mgr,
+                    dispatch_wait_seconds=dispatch_wait if dispatch_wait >= 0 else None)
         g.admitted = lambda: (True if no_gpu else lease.valid) and slot_mgr.any_alive()
         net_url = env.get("GOOGLE_FLOW_NETWORK_URL", "").strip()
         net_tok = env.get("GOOGLE_FLOW_NETWORK_TOKEN", "").strip()

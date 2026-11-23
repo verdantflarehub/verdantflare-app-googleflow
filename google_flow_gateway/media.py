@@ -32,8 +32,10 @@ class Media:
             if mime in ("image/png", "image/jpeg", "image/webp"):
                 with Image.open(io.BytesIO(data)) as img:
                     width, height = img.size
-                    if Image.MIME[img.format] != mime or width * height > 40_000_000:
+                    actual_mime = Image.MIME.get(img.format)
+                    if actual_mime not in ("image/png", "image/jpeg", "image/webp") or width * height > 40_000_000:
                         raise ValueError()
+                    mime = actual_mime
                     img.verify()
                 with Image.open(io.BytesIO(data)) as img:
                     img.load()

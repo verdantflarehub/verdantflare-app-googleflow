@@ -74,11 +74,13 @@ def view(row, result_meta=None, account_label=None):
 
 
 class Gateway:
-    def __init__(self, queue, client, media, output, org, slots=None):
+    def __init__(self, queue, client, media, output, org, slots=None, dispatch_wait_seconds=None):
         self.q, self.client, self.media, self.output, self.org = queue, client, media, output, org
         self.slots = slots
+        self.dispatch_wait_seconds = dispatch_wait_seconds
         self.admitted = lambda: True
         self._inflight = set()
+        self._bg_tasks = set()
         self.q.db.executescript("""
             CREATE TABLE IF NOT EXISTS inputs(owner TEXT, digest TEXT, PRIMARY KEY(owner,digest));
             CREATE TABLE IF NOT EXISTS results(id TEXT PRIMARY KEY, metadata TEXT);
@@ -438,7 +440,23 @@ def execution(g, token):
             g.references(owner, payload)
             g.video_references(owner, payload)
             row = g.q.intent(owner, key, payload)
-            await g.dispatch(row)
+            if g.dispatch_wait_seconds is None:
+                await g.dispatch(row)
+            else:
+                task = asyncio.create_task(g.dispatch(row))
+                g._bg_tasks.add(task)
+                def _done(t):
+                    g._bg_tasks.discard(t)
+                    if not t.cancelled():
+                        try:
+                            t.exception()
+                        except Exception:
+                            pass
+                task.add_done_callback(_done)
+                try:
+                    await asyncio.wait_for(asyncio.shield(task), timeout=g.dispatch_wait_seconds)
+                except asyncio.TimeoutError:
+                    pass
             updated = g.q.find("id", row["id"], owner)
             res_row = g.q.db.execute("SELECT metadata FROM results WHERE id=?", (updated["id"],)).fetchone()
             return reply(view(updated, json.loads(res_row[0]) if res_row else None))
