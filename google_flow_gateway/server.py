@@ -74,13 +74,17 @@ def view(row, result_meta=None, account_label=None):
 
 
 class Gateway:
-    def __init__(self, queue, client, media, output, org, slots=None, dispatch_wait_seconds=None):
+    def __init__(self, queue, client, media, output, org, slots=None, dispatch_wait_seconds=None,
+                 collect_timeout_seconds=900.0, collect_retry_interval=30.0):
         self.q, self.client, self.media, self.output, self.org = queue, client, media, output, org
         self.slots = slots
         self.dispatch_wait_seconds = dispatch_wait_seconds
+        self.collect_timeout_seconds = collect_timeout_seconds
+        self.collect_retry_interval = collect_retry_interval
         self.admitted = lambda: True
         self._inflight = set()
         self._bg_tasks = set()
+        self._collect_next_at = {}
         self.q.db.executescript("""
             CREATE TABLE IF NOT EXISTS inputs(owner TEXT, digest TEXT, PRIMARY KEY(owner,digest));
             CREATE TABLE IF NOT EXISTS results(id TEXT PRIMARY KEY, metadata TEXT);
@@ -369,18 +373,45 @@ class Gateway:
                 audit_detail["upscale_target"] = upscale
             self.q.audit("system", "succeeded", audit_detail)
 
+    def _fail_collect_timeout(self, row):
+        aid = row["account_id"] if "account_id" in row.keys() else "default"
+        with self.q.transaction():
+            current = self.q.find("id", row["id"])
+            if not current or current["state"] != "running" or current["revision"] != row["revision"]:
+                return
+            self.q.db.execute(
+                "UPDATE calls SET state='failed',reason='collect_timeout',reserve=0 WHERE id=?",
+                (row["id"],),
+            )
+            self.q.audit("system", "failed", {"account_id": aid, "call_id": row["id"], "reason": "collect_timeout"})
+        self._collect_next_at.pop(row["id"], None)
+
     async def tick(self):
-        import asyncio
+        now = self.q.clock()
         with self.q.transaction():
             if not self.q.any_active_account():
                 return
             rows = self.q.db.execute("SELECT * FROM calls WHERE state IN ('pending','running') ORDER BY rowid").fetchall()
         async def advance(row):
+            cid = row["id"]
+            if cid in self._inflight:
+                return
             try:
                 if row["state"] == "pending":
                     await self.dispatch(row)
-                elif not self.q.db.execute("SELECT 1 FROM results WHERE id=?", (row["id"],)).fetchone():
-                    await self.collect(row)
+                elif not self.q.db.execute("SELECT 1 FROM results WHERE id=?", (cid,)).fetchone():
+                    started = row["started"]
+                    if started is not None and self.collect_timeout_seconds and (now - started) >= self.collect_timeout_seconds:
+                        self._fail_collect_timeout(row)
+                        return
+                    if self.collect_retry_interval and now < self._collect_next_at.get(cid, 0.0):
+                        return
+                    self._inflight.add(cid)
+                    self._collect_next_at[cid] = now + self.collect_retry_interval
+                    try:
+                        await self.collect(row)
+                    finally:
+                        self._inflight.discard(cid)
             except Error:
                 return
         await asyncio.gather(*(advance(row) for row in rows))

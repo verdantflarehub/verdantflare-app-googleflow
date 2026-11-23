@@ -548,6 +548,47 @@ class MultiAccountTests(unittest.IsolatedAsyncioTestCase):
             self.assertTrue(r2.json()["accepted"])
             self.assertEqual(r2.json()["state"], "running")
 
+    async def test_tick_collect_backoff_and_timeout_releases_slot(self):
+        class EmptyDownloadClient(FakeAccountClient):
+            def __init__(self, *args, **kwargs):
+                super().__init__(*args, **kwargs)
+                self.download_attempts = 0
+
+            async def tool(self, name, **arguments):
+                if name == "gflow_download_media":
+                    self.download_attempts += 1
+                    return {"error": {"code": "not_found"}}
+                return await super().tool(name, **arguments)
+
+        c = EmptyDownloadClient("default", credits=100)
+        self.clients["default"] = c
+        gw = Gateway(self.q, c, self.media, self.output, "org1", slots=self.clients,
+                     collect_timeout_seconds=120.0, collect_retry_interval=30.0)
+        row = self.q.intent("o1", "k-stuck-1", {"capability": "video", "model": "veo-lite", "parameters": {"prompt": "hi"}})
+        await gw.dispatch(row)
+        self.assertEqual(self.q.find("id", row["id"])["state"], "running")
+        initial_attempts = c.download_attempts
+
+        # Tick immediately (elapsed=0s): first retry runs, next retry within 30s is skipped by backoff
+        await gw.tick()
+        self.assertEqual(c.download_attempts, initial_attempts + 1)
+        self.now += 10.0
+        await gw.tick()
+        self.assertEqual(c.download_attempts, initial_attempts + 1)
+
+        # After 30s backoff, retry runs once more
+        self.now += 25.0
+        await gw.tick()
+        self.assertEqual(c.download_attempts, initial_attempts + 2)
+
+        # Past collect_timeout_seconds (120s), tick marks failed(collect_timeout) and releases reserve
+        self.now += 100.0
+        await gw.tick()
+        updated = self.q.find("id", row["id"])
+        self.assertEqual(updated["state"], "failed")
+        self.assertEqual(updated["reason"], "collect_timeout")
+        self.assertEqual(updated["reserve"], 0)
+
 
 if __name__ == "__main__":
     unittest.main()
